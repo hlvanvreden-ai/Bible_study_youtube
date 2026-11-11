@@ -1,0 +1,39 @@
+name: Daily Bible Study Video Production
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Runs daily at 04:00 AM UTC
+  repository_dispatch:
+    types: [build_daily_video]
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies (FFmpeg & ImageMagick)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+          # Fix ImageMagick security policy for text rendering
+          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@\*"/' /etc/ImageMagick-6/policy.xml
+
+      - name: Install Python Packages
+        run: |
+          pip install google-generativeai gspread google-auth google-api-python-client edge-tts moviepy
+
+      - name: Run Production Script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+        run: python scripts/generate_and_publish.py
