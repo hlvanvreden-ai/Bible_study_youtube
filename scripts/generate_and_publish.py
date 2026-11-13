@@ -3,6 +3,7 @@ import json
 import asyncio
 import gspread
 from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials as UserCredentials
 from google import genai
 from google.genai import types
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -119,7 +120,7 @@ output_video_path = "final_output.mp4"
 final_video.write_videofile(output_video_path, fps=24, codec="libx264", audio_codec="aac")
 
 # --- 6. UPLOAD & SCHEDULE TO YOUTUBE ---
-yt_creds = Credentials.from_authorized_user_info(YOUTUBE_TOKEN_JSON)
+yt_creds = UserCredentials.from_authorized_user_info(YOUTUBE_TOKEN_JSON)
 youtube = build("youtube", "v3", credentials=yt_creds)
 
 publish_time = study.get("Scheduled Date", "")  # Format: "2026-11-12T06:00:00Z"
