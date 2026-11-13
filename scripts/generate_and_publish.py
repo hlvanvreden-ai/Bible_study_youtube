@@ -3,7 +3,9 @@ import json
 import asyncio
 import gspread
 from google.oauth2.service_account import Credentials
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 import edge_tts
 from moviepy.editor import (
     AudioFileClip,
@@ -71,10 +73,12 @@ Return ONLY valid JSON matching this format:
 }}
 """
 
-model = genai.GenerativeModel("gemini-3.8-flash")
-response = model.generate_content(
-    prompt,
-    generation_config={"response_mime_type": "application/json"}
+response = client.models.generate_content(
+    model="gemini-3.8-flash",
+    contents=prompt,
+    config=types.GenerateContentConfig(
+        response_mime_type="application/json"
+    ),
 )
 video_data = json.loads(response.text)
 
