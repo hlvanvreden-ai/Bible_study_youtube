@@ -71,7 +71,7 @@ Return ONLY valid JSON matching this format:
 }}
 """
 
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-3.8-flash")
 response = model.generate_content(
     prompt,
     generation_config={"response_mime_type": "application/json"}
