@@ -29,7 +29,7 @@ jobs:
 
       - name: Install Python Packages
         run: |
-          pip install google-genai gspread google-auth google-auth-oauthlib google-api-python-client edge-tts moviepy pillow
+          pip install google-genai gspread google-auth google-auth-oauthlib google-api-python-client edge-tts moviepy==1.0.3 pillow
 
       - name: Run Production Script
         env:
