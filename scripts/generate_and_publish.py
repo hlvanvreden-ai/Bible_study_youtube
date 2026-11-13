@@ -1,76 +1,89 @@
 import os
 import json
 import asyncio
+import random
 import gspread
-from google.oauth2.service_account import Credentials
-from google.oauth2.credentials import Credentials as UserCredentials
+import edge_tts
 from google import genai
 from google.genai import types
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-import edge_tts
-from moviepy.editor import (
-    AudioFileClip,
-    VideoFileClip,
-    TextClip,
-    CompositeVideoClip,
-    ColorClip
-)
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from moviepy.editor import (
+    AudioFileClip,
+    ColorClip,
+    CompositeVideoClip,
+    TextClip,
+    VideoFileClip,
+    concatenate_videoclips,
+)
 
-# --- 1. SETUP & AUTHENTICATION ---
+# --- 1. LOAD ENVIRONMENT SECRETS ---
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GOOGLE_CREDS_JSON = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-YOUTUBE_TOKEN_JSON = json.loads(os.environ["YOUTUBE_TOKEN_JSON"])
+SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+YOUTUBE_TOKEN_INFO = json.loads(os.environ["YOUTUBE_TOKEN_JSON"])
 
-genai.configure(api_key=GEMINI_API_KEY)
-
-# Connect to Google Sheets
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
+# --- 2. CONNECT TO GOOGLE SHEETS ---
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
-sheet_creds = Credentials.from_service_account_info(GOOGLE_CREDS_JSON, scopes=scope)
-gc = gspread.authorize(sheet_creds)
+sheets_creds = ServiceAccountCredentials.from_service_account_info(
+    SERVICE_ACCOUNT_INFO, scopes=SCOPES
+)
+gc = gspread.authorize(sheets_creds)
 sheet = gc.open("Bible study list").sheet1
+records = sheet.get_all_records()
 
-# --- 2. FETCH NEXT "READY" STUDY ---
-rows = sheet.get_all_records()
-target_row_idx = None
+target_row_index = None
 study = None
 
-for idx, r in enumerate(rows, start=2):  # Row 1 is header
-    if str(r.get("Video Status", "")).strip().lower() == "ready":
-        study = r
-        target_row_idx = idx
+for idx, row in enumerate(records, start=2):  # Row 1 is headers
+    if str(row.get("Video Status", "")).strip().lower() == "ready":
+        target_row_index = idx
+        study = row
         break
 
 if not study:
-    print("No rows marked as 'Ready'. Exiting.")
+    print("No rows marked as 'Ready' in the sheet. Exiting cleanly.")
     exit(0)
 
-print(f"Processing study: {study.get('Title', 'Untitled')}")
+print(f"Processing Row {target_row_index}: {study.get('title')}")
 
-# --- 3. TRANSFORM NOTES TO SPOKEN SCRIPT (GEMINI) ---
+# --- 3. GENERATE SCRIPT & METADATA WITH GEMINI ---
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+video_format = str(study.get("Video Format", "Devotional")).strip()
+is_short = video_format.lower() == "short"
+
+length_guidance = (
+    "45 to 55 seconds spoken aloud (roughly 110-135 words), punchy and impactful."
+    if is_short
+    else "3 to 4 minutes spoken aloud (roughly 450-550 words), warm, reverent, and deeply encouraging."
+)
+
 prompt = f"""
-Convert this Bible study into a warm, contemplative, easy-reading YouTube devotional script (2 to 3 minutes, approx 350-450 words).
-Structure into:
-1. Hook (relatable problem)
-2. Scripture reading
-3. Insight/word study
-4. Practical application
-5. Closing prayer
+You are a reverent, Christ-centered Bible teacher creating a {video_format} video script.
+Write a spoken narration script based on the study notes below.
 
-Title: {study.get('Title')}
-Scripture: {study.get('Scripture References', study.get('Scripture', ''))}
-Notes: {study.get('Premise', '')} {study.get('Rich Notes', '')}
+Guidelines:
+- Target length: {length_guidance}
+- Write natural spoken prose ONLY (no stage directions, no "[Music]", no markdown formatting, no bullet points).
+- Ground every point in the provided Scripture and notes.
+- End with a brief, heartfelt closing prayer.
 
-Return ONLY valid JSON matching this format:
+Title: {study.get('title', '')}
+Scripture: {study.get('scripture', '')}
+Summary: {study.get('summary', '')}
+Detailed Notes: {study.get('details', '')}
+
+Return ONLY valid JSON matching this exact structure:
 {{
   "voiceover_text": "Spoken text without stage directions...",
   "youtube_title": "Compelling Title | Scripture Devotional",
-  "youtube_description": "Clean description with timestamps...",
-  "featured_verse": "Quote of the key verse"
+  "youtube_description": "Clean description with scripture references and prayer...",
+  "featured_verse": "Short key verse quote for on-screen display"
 }}
 """
 
@@ -82,71 +95,128 @@ response = client.models.generate_content(
     ),
 )
 video_data = json.loads(response.text)
+print("Generated script and metadata successfully.")
 
 # --- 4. GENERATE AUDIO (FREE EDGE-TTS) ---
-VOICE = "en-US-ChristopherNeural"  # Deep, warm, deliberate voice
+VOICE = "en-US-ChristopherNeural"
 audio_path = "output_audio.mp3"
 
+
 async def make_audio():
-    communicate = edge_tts.Communicate(video_data["voiceover_text"], VOICE, rate="-4%")
+    communicate = edge_tts.Communicate(
+        video_data["voiceover_text"], VOICE, rate="-4%"
+    )
     await communicate.save(audio_path)
 
-asyncio.run(make_audio())
 
-# --- 5. RENDER VIDEO (MOVIEPY) ---
-# Uses background video loops placed in 'assets/backgrounds/'
+asyncio.run(make_audio())
+print("Generated voiceover audio.")
+
+# --- 5. RENDER VIDEO (MOVIEPY 1.0.3) ---
 audio_clip = AudioFileClip(audio_path)
 duration = audio_clip.duration
 
-# Background clip (falls back to a calm dark background if no asset is present)
-bg_path = "assets/backgrounds/calm_water.mp4"
-if os.path.exists(bg_path):
-    bg_clip = VideoFileClip(bg_path).loop(duration=duration).resize((1920, 1080))
+width, height = (1080, 1920) if is_short else (1920, 1080)
+
+# Look for optional background video loops in assets/backgrounds/
+bg_dir = "assets/backgrounds"
+bg_files = []
+if os.path.isdir(bg_dir):
+    bg_files = [
+        os.path.join(bg_dir, f)
+        for f in os.listdir(bg_dir)
+        if f.lower().endswith((".mp4", ".mov", ".webm"))
+    ]
+
+if bg_files:
+    chosen_bg = random.choice(bg_files)
+    raw_bg = VideoFileClip(chosen_bg).without_audio()
+    raw_bg = raw_bg.resize((width, height))
+    loops = int(duration // raw_bg.duration) + 1
+    bg_clip = concatenate_videoclips([raw_bg] * loops).subclip(0, duration)
+    overlay = ColorClip(size=(width, height), color=(15, 23, 42)).set_opacity(0.55).set_duration(duration)
+    base_layer = CompositeVideoClip([bg_clip, overlay])
 else:
-    bg_clip = ColorClip(size=(1920, 1080), color=(15, 23, 42), duration=duration)
+    base_layer = ColorClip(size=(width, height), color=(24, 34, 54)).set_duration(duration)
 
-# Title & Scripture Overlay
-txt_title = TextClip(
-    video_data.get("featured_verse", study.get("Title")),
-    fontsize=48,
-    color="white",
-    font="Helvetica-Bold",
-    method="caption",
-    size=(1600, None)
-).set_position(("center", "center")).set_duration(duration)
+title_text = str(study.get("title", "")).upper()
+verse_text = f"\"{video_data.get('featured_verse', '')}\"\n— {study.get('scripture', '')}"
 
-final_video = CompositeVideoClip([bg_clip, txt_title]).set_audio(audio_clip)
+title_clip = (
+    TextClip(
+        title_text,
+        fontsize=64 if not is_short else 58,
+        color="#F4EAD4",
+        font="DejaVu-Sans-Bold",
+        method="caption",
+        size=(int(width * 0.82), None),
+        align="center",
+    )
+    .set_position(("center", int(height * 0.28)))
+    .set_duration(duration)
+)
+
+verse_clip = (
+    TextClip(
+        verse_text,
+        fontsize=42 if not is_short else 40,
+        color="#FFFFFF",
+        font="DejaVu-Sans",
+        method="caption",
+        size=(int(width * 0.78), None),
+        align="center",
+    )
+    .set_position(("center", int(height * 0.50)))
+    .set_duration(duration)
+)
+
+final_video = CompositeVideoClip([base_layer, title_clip, verse_clip]).set_audio(audio_clip)
 output_video_path = "final_output.mp4"
-final_video.write_videofile(output_video_path, fps=24, codec="libx264", audio_codec="aac")
+final_video.write_videofile(
+    output_video_path,
+    fps=24,
+    codec="libx264",
+    audio_codec="aac",
+    threads=4,
+    preset="medium",
+)
+print("Video rendering complete.")
 
-# --- 6. UPLOAD & SCHEDULE TO YOUTUBE ---
-yt_creds = UserCredentials.from_authorized_user_info(YOUTUBE_TOKEN_JSON)
+# --- 6. UPLOAD & SCHEDULE ON YOUTUBE ---
+yt_creds = UserCredentials.from_authorized_user_info(YOUTUBE_TOKEN_INFO)
 youtube = build("youtube", "v3", credentials=yt_creds)
 
-publish_time = study.get("Scheduled Date", "")  # Format: "2026-11-12T06:00:00Z"
+scheduled_date = str(study.get("Scheduled Date", "")).strip()
 
 body = {
     "snippet": {
         "title": video_data["youtube_title"][:100],
         "description": video_data["youtube_description"],
-        "tags": ["Bible Study", "Devotional", "Scripture", "Sanctuary"],
-        "categoryId": "22"  # People & Blogs
+        "tags": ["Bible Study", "Christian Devotional", "Scripture", study.get("category", "Faith")],
+        "categoryId": "22",  # People & Blogs
     },
     "status": {
         "privacyStatus": "private",
-        "publishAt": publish_time if publish_time else None
-    }
+        "publishAt": scheduled_date,
+        "selfDeclaredMadeForKids": False,
+    },
 }
 
-media = MediaFileUpload(output_video_path, chunksize=-1, resumable=True)
-upload_request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-video_response = upload_request.execute()
-yt_url = f"https://youtu.be/{video_response['id']}"
+media = MediaFileUpload(output_video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
+request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+response_upload = None
+while response_upload is None:
+    status, response_upload = request.next_chunk()
+    if status:
+        print(f"Upload progress: {int(status.progress() * 100)}%")
+
+video_id = response_upload["id"]
+youtube_url = f"https://youtu.be/{video_id}"
+print(f"Successfully uploaded and scheduled: {youtube_url}")
 
 # --- 7. UPDATE GOOGLE SHEET ---
-status_col = list(study.keys()).index("Video Status") + 1
-yt_col = list(study.keys()).index("YouTube URL") + 1 if "YouTube URL" in study else len(study) + 1
-
-sheet.update_cell(target_row_idx, status_col, "Scheduled")
-sheet.update_cell(target_row_idx, yt_col, yt_url)
-print(f"Successfully published and scheduled: {yt_url}")
+# Columns: G (7) = Video Status, J (10) = YouTube URL
+sheet.update_cell(target_row_index, 7, "Scheduled")
+sheet.update_cell(target_row_index, 10, youtube_url)
+print(f"Updated Row {target_row_index} to 'Scheduled' with URL {youtube_url}.")
