@@ -1,7 +1,8 @@
 import os
 import json
 import asyncio
-import random
+import smtplib
+from email.message import EmailMessage
 import gspread
 import edge_tts
 from google import genai
@@ -26,7 +27,41 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 YOUTUBE_TOKEN_INFO = json.loads(os.environ["YOUTUBE_TOKEN_JSON"])
 
-# --- 2. CONNECT TO GOOGLE SHEETS & PICK EARLIEST READY ROW ---
+# Optional secrets for Two-Step Review Portal & Email Notification
+REVIEW_WEBAPP_URL = os.environ.get("REVIEW_WEBAPP_URL", "").strip()
+NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "").strip()
+SMTP_USER = os.environ.get("SMTP_USER", "").strip()
+SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
+
+
+def send_review_notification(row_idx, study_title, youtube_url):
+    """Sends an email with the Apps Script review portal link (or direct YouTube preview)."""
+    review_link = (
+        f"{REVIEW_WEBAPP_URL}?row={row_idx}" if REVIEW_WEBAPP_URL else youtube_url
+    )
+    print(f"Review link ready: {review_link}")
+
+    if not (NOTIFY_EMAIL and SMTP_USER and SMTP_PASS):
+        print("SMTP email secrets not set; skipping email dispatch.")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = f"🎬 Review Ready: {study_title} (Row {row_idx})"
+    msg["From"] = SMTP_USER
+    msg["To"] = NOTIFY_EMAIL
+    msg.set_content(
+        f"Your Bible study video '{study_title}' (Row {row_idx}) has been rendered and staged as Unlisted.\n\n"
+        f"Review & Approve/Disapprove here:\n{review_link}\n\n"
+        f"Direct Unlisted YouTube Link:\n{youtube_url}\n"
+    )
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(SMTP_USER, SMTP_PASS)
+        smtp.send_message(msg)
+    print(f"Review notification email sent to {NOTIFY_EMAIL}.")
+
+
+# --- 2. CONNECT TO GOOGLE SHEETS & YOUTUBE ---
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -38,6 +73,39 @@ gc = gspread.authorize(sheets_creds)
 sheet = gc.open("Bible study list").sheet1
 records = sheet.get_all_records()
 
+yt_creds = UserCredentials.from_authorized_user_info(YOUTUBE_TOKEN_INFO)
+youtube = build("youtube", "v3", credentials=yt_creds)
+
+# --- 3. STAGE 2 CHECK: PUBLISH ANY 'APPROVED' VIDEOS FIRST ---
+for idx, row in enumerate(records, start=2):
+    if str(row.get("Video Status", "")).strip().lower() == "approved":
+        yt_url = str(row.get("YouTube URL", "")).strip()
+        scheduled_date = str(row.get("Scheduled Date", "")).strip()
+
+        if not yt_url:
+            print(f"Row {idx} is marked 'Approved' but has no YouTube URL. Skipping.")
+            continue
+
+        video_id = yt_url.rstrip("/").split("/")[-1].split("?")[0]
+        print(f"Publishing Approved Row {idx} (Video ID: {video_id}) for {scheduled_date}...")
+
+        youtube.videos().update(
+            part="status",
+            body={
+                "id": video_id,
+                "status": {
+                    "privacyStatus": "private",
+                    "publishAt": scheduled_date,
+                    "selfDeclaredMadeForKids": False,
+                },
+            },
+        ).execute()
+
+        sheet.update_cell(idx, 7, "Scheduled")
+        print(f"Row {idx} successfully scheduled on YouTube for {scheduled_date}!")
+        exit(0)
+
+# --- 4. STAGE 1: PICK EARLIEST 'READY' ROW FOR RENDERING ---
 ready_rows = []
 for idx, row in enumerate(records, start=2):
     if str(row.get("Video Status", "")).strip().lower() == "ready":
@@ -45,15 +113,15 @@ for idx, row in enumerate(records, start=2):
         ready_rows.append((sched_str, idx, row))
 
 if not ready_rows:
-    print("No rows marked as 'Ready'. Exiting cleanly.")
+    print("No rows marked as 'Approved' or 'Ready'. Exiting cleanly.")
     exit(0)
 
-# Prioritizes same-day entries ahead of future scheduled rows
+# Prioritizes same-day entries ahead of future queued rows
 ready_rows.sort(key=lambda x: x[0] if x[0] else "9999-12-31T23:59:59Z")
 _, target_row_index, study = ready_rows[0]
-print(f"Producing Row {target_row_index}: {study.get('title')}")
+print(f"Rendering Stage 1 for Row {target_row_index}: {study.get('title')}")
 
-# --- 3. READ CREATIVE CONTROL INSTRUCTIONS ---
+# --- 5. READ CREATIVE CONTROL COLUMNS (K–O) ---
 video_format = str(study.get("Video Format", "Devotional")).strip()
 is_short = video_format.lower() == "short"
 
@@ -71,7 +139,7 @@ VOICE_MAP = {
 }
 selected_voice = VOICE_MAP.get(voice_choice, "en-US-ChristopherNeural")
 
-# --- 4. GENERATE MULTI-SLIDE STORYBOARD & SCRIPT (GEMINI) ---
+# --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI ---
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 length_guidance = (
@@ -120,10 +188,9 @@ storyboard = json.loads(response.text)
 slides_data = storyboard.get("slides", [])
 print(f"Generated {len(slides_data)}-slide storyboard.")
 
-# --- 5. GENERATE PER-SLIDE AUDIO & BUILD TIMED SLIDE CLIPS ---
+# --- 7. GENERATE PER-SLIDE AUDIO & RENDER MULTI-SLIDE VIDEO ---
 width, height = (1080, 1920) if is_short else (1920, 1080)
 
-# Locate themed background videos if available
 theme_dir = os.path.join("assets", "backgrounds", visual_theme)
 fallback_dir = os.path.join("assets", "backgrounds")
 bg_pool = []
@@ -150,24 +217,24 @@ async def synthesize_slide_audio(text, out_file):
 
 
 slide_clips = []
-audio_clips = []
 
 for i, slide in enumerate(slides_data):
     slide_audio_path = f"slide_{i}.mp3"
     asyncio.run(synthesize_slide_audio(slide["narration"], slide_audio_path))
 
     a_clip = AudioFileClip(slide_audio_path)
-    # Add 0.6s breathing room at the end of each slide
     slide_dur = a_clip.duration + 0.6
-    audio_clips.append(a_clip)
 
-    # Background layer for this slide
     if bg_pool:
         chosen_vid = bg_pool[i % len(bg_pool)]
         raw_vid = VideoFileClip(chosen_vid).without_audio().resize((width, height))
         loops = int(slide_dur // raw_vid.duration) + 1
         looped = concatenate_videoclips([raw_vid] * loops).subclip(0, slide_dur)
-        dimmer = ColorClip(size=(width, height), color=(12, 18, 30)).set_opacity(0.55).set_duration(slide_dur)
+        dimmer = (
+            ColorClip(size=(width, height), color=(12, 18, 30))
+            .set_opacity(0.55)
+            .set_duration(slide_dur)
+        )
         bg_layer = CompositeVideoClip([looped, dimmer])
     else:
         bg_layer = ColorClip(size=(width, height), color=bg_rgb).set_duration(slide_dur)
@@ -210,7 +277,7 @@ for i, slide in enumerate(slides_data):
 
 final_video = concatenate_videoclips(slide_clips, method="compose", padding=-0.6)
 
-# Optional ambient background music track at low volume (-24 dB / ~0.07 volume)
+# Mix optional low-volume ambient music track
 music_path = os.path.join("assets", "music", music_track) if music_track else ""
 if music_path and os.path.isfile(music_path):
     bg_music = AudioFileClip(music_path)
@@ -227,27 +294,30 @@ final_video.write_videofile(
     threads=4,
     preset="medium",
 )
+print("Multi-slide video rendering complete.")
 
-# --- 6. UPLOAD & SCHEDULE ON YOUTUBE ---
-yt_creds = UserCredentials.from_authorized_user_info(YOUTUBE_TOKEN_INFO)
-youtube = build("youtube", "v3", credentials=yt_creds)
-scheduled_date = str(study.get("Scheduled Date", "")).strip()
-
+# --- 8. UPLOAD TO YOUTUBE AS 'UNLISTED' FOR REVIEW ---
 body = {
     "snippet": {
         "title": storyboard["youtube_title"][:100],
         "description": storyboard["youtube_description"],
-        "tags": ["Bible Study", "Christian Devotional", "Scripture", study.get("category", "Faith")],
+        "tags": [
+            "Bible Study",
+            "Christian Devotional",
+            "Scripture",
+            study.get("category", "Faith"),
+        ],
         "categoryId": "22",
     },
     "status": {
-        "privacyStatus": "private",
-        "publishAt": scheduled_date,
+        "privacyStatus": "unlisted",
         "selfDeclaredMadeForKids": False,
     },
 }
 
-media = MediaFileUpload(output_video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
+media = MediaFileUpload(
+    output_video_path, chunksize=-1, resumable=True, mimetype="video/mp4"
+)
 request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
 response_upload = None
@@ -256,7 +326,12 @@ while response_upload is None:
     if status:
         print(f"Upload progress: {int(status.progress() * 100)}%")
 
-youtube_url = f"https://youtu.be/{response_upload['id']}"
-sheet.update_cell(target_row_index, 7, "Scheduled")
+video_id = response_upload["id"]
+youtube_url = f"https://youtu.be/{video_id}"
+print(f"Uploaded unlisted draft for review: {youtube_url}")
+
+# --- 9. UPDATE SHEET TO 'PENDING REVIEW' & NOTIFY ---
+sheet.update_cell(target_row_index, 7, "Pending Review")
 sheet.update_cell(target_row_index, 10, youtube_url)
-print(f"Completed and scheduled Row {target_row_index}: {youtube_url}")
+send_review_notification(target_row_index, study.get("title", "Untitled"), youtube_url)
+print(f"Row {target_row_index} updated to 'Pending Review'.")
