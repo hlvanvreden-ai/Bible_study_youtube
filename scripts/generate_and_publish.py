@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import asyncio
 import smtplib
@@ -179,11 +180,30 @@ Return ONLY valid JSON matching this schema:
 }}
 """
 
-response = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents=prompt,
-    config=types.GenerateContentConfig(response_mime_type="application/json"),
-)
+models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
+response = None
+
+for attempt in range(1, 6):
+    model_name = models_to_try[0] if attempt <= 3 else models_to_try[1]
+    try:
+        print(f"Calling Gemini ({model_name}), attempt {attempt}/5...")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        break
+    except Exception as e:
+        if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
+            wait_sec = attempt * 15
+            print(f"Gemini busy ({e}). Retrying in {wait_sec}s...")
+            time.sleep(wait_sec)
+        else:
+            raise
+
+if response is None:
+    raise RuntimeError("Gemini API remained unavailable after 5 retry attempts.")
+
 storyboard = json.loads(response.text)
 slides_data = storyboard.get("slides", [])
 print(f"Generated {len(slides_data)}-slide storyboard.")
