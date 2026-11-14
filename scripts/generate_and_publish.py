@@ -36,20 +36,21 @@ gc = gspread.authorize(sheets_creds)
 sheet = gc.open("Bible study list").sheet1
 records = sheet.get_all_records()
 
-target_row_index = None
-study = None
-
+ready_rows = []
 for idx, row in enumerate(records, start=2):  # Row 1 is headers
     if str(row.get("Video Status", "")).strip().lower() == "ready":
-        target_row_index = idx
-        study = row
-        break
+        sched_str = str(row.get("Scheduled Date", "")).strip()
+        ready_rows.append((sched_str, idx, row))
 
-if not study:
+if not ready_rows:
     print("No rows marked as 'Ready' in the sheet. Exiting cleanly.")
     exit(0)
 
-print(f"Processing Row {target_row_index}: {study.get('title')}")
+# Sort by Scheduled Date ascending so today's entry is always processed before future queued rows
+ready_rows.sort(key=lambda x: x[0] if x[0] else "9999-12-31T23:59:59Z")
+_, target_row_index, study = ready_rows[0]
+
+print(f"Processing Row {target_row_index} (Scheduled: {study.get('Scheduled Date')}): {study.get('title')}")
 
 # --- 3. GENERATE SCRIPT & METADATA WITH GEMINI ---
 client = genai.Client(api_key=GEMINI_API_KEY)
