@@ -133,12 +133,13 @@ voice_choice = str(study.get("Voice Style", "Christopher")).strip().lower()
 music_track = str(study.get("Music Track", "")).strip()
 
 VOICE_MAP = {
-    "christopher": "en-US-ChristopherNeural",  # Deep, authoritative male
-    "andrew": "en-US-AndrewNeural",            # Warm, conversational male
-    "aria": "en-US-AriaNeural",                # Gentle, expressive female
-    "jenny": "en-US-JennyNeural",              # Clear, natural female
+    "luke": "en-ZA-LukeNeural",                # Warm South African male (Default)
+    "leah": "en-ZA-LeahNeural",                # Clear, gentle South African female
+    "christopher": "en-US-ChristopherNeural",  # Deep US male
+    "andrew": "en-US-AndrewNeural",            # Conversational US male
+    "aria": "en-US-AriaNeural",                # Expressive US female
 }
-selected_voice = VOICE_MAP.get(voice_choice, "en-US-ChristopherNeural")
+selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
 
 # --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI ---
 client = genai.Client(api_key=GEMINI_API_KEY)
