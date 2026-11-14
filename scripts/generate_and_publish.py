@@ -13,18 +13,20 @@ from googleapiclient.http import MediaFileUpload
 from moviepy.editor import (
     AudioFileClip,
     ColorClip,
+    CompositeAudioClip,
     CompositeVideoClip,
     TextClip,
     VideoFileClip,
     concatenate_videoclips,
 )
+from moviepy.audio.fx.all import audio_loop
 
 # --- 1. LOAD ENVIRONMENT SECRETS ---
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 YOUTUBE_TOKEN_INFO = json.loads(os.environ["YOUTUBE_TOKEN_JSON"])
 
-# --- 2. CONNECT TO GOOGLE SHEETS ---
+# --- 2. CONNECT TO GOOGLE SHEETS & PICK EARLIEST READY ROW ---
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -37,141 +39,185 @@ sheet = gc.open("Bible study list").sheet1
 records = sheet.get_all_records()
 
 ready_rows = []
-for idx, row in enumerate(records, start=2):  # Row 1 is headers
+for idx, row in enumerate(records, start=2):
     if str(row.get("Video Status", "")).strip().lower() == "ready":
         sched_str = str(row.get("Scheduled Date", "")).strip()
         ready_rows.append((sched_str, idx, row))
 
 if not ready_rows:
-    print("No rows marked as 'Ready' in the sheet. Exiting cleanly.")
+    print("No rows marked as 'Ready'. Exiting cleanly.")
     exit(0)
 
-# Sort by Scheduled Date ascending so today's entry is always processed before future queued rows
+# Prioritizes same-day entries ahead of future scheduled rows
 ready_rows.sort(key=lambda x: x[0] if x[0] else "9999-12-31T23:59:59Z")
 _, target_row_index, study = ready_rows[0]
+print(f"Producing Row {target_row_index}: {study.get('title')}")
 
-print(f"Processing Row {target_row_index} (Scheduled: {study.get('Scheduled Date')}): {study.get('title')}")
-
-# --- 3. GENERATE SCRIPT & METADATA WITH GEMINI ---
-client = genai.Client(api_key=GEMINI_API_KEY)
-
+# --- 3. READ CREATIVE CONTROL INSTRUCTIONS ---
 video_format = str(study.get("Video Format", "Devotional")).strip()
 is_short = video_format.lower() == "short"
 
+creative_brief = str(study.get("Creative Brief", "")).strip()
+slide_breakdown = str(study.get("Slide Breakdown", "")).strip()
+visual_theme = str(study.get("Visual Theme", "navy_gold")).strip().lower()
+voice_choice = str(study.get("Voice Style", "Christopher")).strip().lower()
+music_track = str(study.get("Music Track", "")).strip()
+
+VOICE_MAP = {
+    "christopher": "en-US-ChristopherNeural",  # Deep, authoritative male
+    "andrew": "en-US-AndrewNeural",            # Warm, conversational male
+    "aria": "en-US-AriaNeural",                # Gentle, expressive female
+    "jenny": "en-US-JennyNeural",              # Clear, natural female
+}
+selected_voice = VOICE_MAP.get(voice_choice, "en-US-ChristopherNeural")
+
+# --- 4. GENERATE MULTI-SLIDE STORYBOARD & SCRIPT (GEMINI) ---
+client = genai.Client(api_key=GEMINI_API_KEY)
+
 length_guidance = (
-    "45 to 55 seconds spoken aloud (roughly 110-135 words), punchy and impactful."
+    "45 to 55 seconds total (roughly 115-135 words across 3 slides)."
     if is_short
-    else "3 to 4 minutes spoken aloud (roughly 450-550 words), warm, reverent, and deeply encouraging."
+    else "3 to 4 minutes total (roughly 450-550 words across 5 distinct slides)."
 )
 
 prompt = f"""
-You are a reverent, Christ-centered Bible teacher creating a {video_format} video script.
-Write a spoken narration script based on the study notes below.
+You are a reverent, Christ-centered Bible teacher and video director creating a {video_format} video.
+Convert the study below into a multi-slide storyboard with spoken narration for each slide.
 
-Guidelines:
-- Target length: {length_guidance}
-- Write natural spoken prose ONLY (no stage directions, no "[Music]", no markdown formatting, no bullet points).
-- Ground every point in the provided Scripture and notes.
-- End with a brief, heartfelt closing prayer.
+Creative Director Instructions: {creative_brief if creative_brief else "Warm, reverent, clear teaching."}
+Requested Slide Structure: {slide_breakdown if slide_breakdown else "Slide 1: Hook & Title | Slide 2: Scripture Anchor | Slide 3: Core Teaching | Slide 4: Daily Application | Slide 5: Closing Prayer"}
+Target Length: {length_guidance}
+
+Rules:
+- Each slide must have 'heading' (short uppercase banner), 'on_screen_text' (key verse or 2-3 short bullet points for the screen), and 'narration' (natural spoken prose ONLY—no stage directions, no markdown).
+- Keep on_screen_text concise and readable (under 25 words per slide).
 
 Title: {study.get('title', '')}
 Scripture: {study.get('scripture', '')}
 Summary: {study.get('summary', '')}
 Detailed Notes: {study.get('details', '')}
 
-Return ONLY valid JSON matching this exact structure:
+Return ONLY valid JSON matching this schema:
 {{
-  "voiceover_text": "Spoken text without stage directions...",
-  "youtube_title": "Compelling Title | Scripture Devotional",
-  "youtube_description": "Clean description with scripture references and prayer...",
-  "featured_verse": "Short key verse quote for on-screen display"
+  "youtube_title": "Compelling Title | Scripture Study",
+  "youtube_description": "Full description with scripture references, timestamps, and prayer...",
+  "slides": [
+    {{
+      "heading": "SLIDE HEADING",
+      "on_screen_text": "Key scripture quote or crisp takeaway points",
+      "narration": "Spoken voiceover for this specific slide..."
+    }}
+  ]
 }}
 """
 
 response = client.models.generate_content(
     model="gemini-3.8-flash",
     contents=prompt,
-    config=types.GenerateContentConfig(
-        response_mime_type="application/json"
-    ),
+    config=types.GenerateContentConfig(response_mime_type="application/json"),
 )
-video_data = json.loads(response.text)
-print("Generated script and metadata successfully.")
+storyboard = json.loads(response.text)
+slides_data = storyboard.get("slides", [])
+print(f"Generated {len(slides_data)}-slide storyboard.")
 
-# --- 4. GENERATE AUDIO (FREE EDGE-TTS) ---
-VOICE = "en-US-ChristopherNeural"
-audio_path = "output_audio.mp3"
-
-
-async def make_audio():
-    communicate = edge_tts.Communicate(
-        video_data["voiceover_text"], VOICE, rate="-4%"
-    )
-    await communicate.save(audio_path)
-
-
-asyncio.run(make_audio())
-print("Generated voiceover audio.")
-
-# --- 5. RENDER VIDEO (MOVIEPY 1.0.3) ---
-audio_clip = AudioFileClip(audio_path)
-duration = audio_clip.duration
-
+# --- 5. GENERATE PER-SLIDE AUDIO & BUILD TIMED SLIDE CLIPS ---
 width, height = (1080, 1920) if is_short else (1920, 1080)
 
-# Look for optional background video loops in assets/backgrounds/
-bg_dir = "assets/backgrounds"
-bg_files = []
-if os.path.isdir(bg_dir):
-    bg_files = [
-        os.path.join(bg_dir, f)
-        for f in os.listdir(bg_dir)
-        if f.lower().endswith((".mp4", ".mov", ".webm"))
-    ]
+# Locate themed background videos if available
+theme_dir = os.path.join("assets", "backgrounds", visual_theme)
+fallback_dir = os.path.join("assets", "backgrounds")
+bg_pool = []
 
-if bg_files:
-    chosen_bg = random.choice(bg_files)
-    raw_bg = VideoFileClip(chosen_bg).without_audio()
-    raw_bg = raw_bg.resize((width, height))
-    loops = int(duration // raw_bg.duration) + 1
-    bg_clip = concatenate_videoclips([raw_bg] * loops).subclip(0, duration)
-    overlay = ColorClip(size=(width, height), color=(15, 23, 42)).set_opacity(0.55).set_duration(duration)
-    base_layer = CompositeVideoClip([bg_clip, overlay])
-else:
-    base_layer = ColorClip(size=(width, height), color=(24, 34, 54)).set_duration(duration)
+for folder in [theme_dir, fallback_dir]:
+    if os.path.isdir(folder):
+        bg_pool.extend(
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if f.lower().endswith((".mp4", ".mov", ".webm"))
+        )
 
-title_text = str(study.get("title", "")).upper()
-verse_text = f"\"{video_data.get('featured_verse', '')}\"\n— {study.get('scripture', '')}"
+PALETTES = {
+    "navy_gold": ((20, 30, 48), "#F4EAD4", "#FFFFFF"),
+    "forest_cream": ((24, 42, 34), "#E9DFC8", "#F8F9FA"),
+    "burgundy_warm": ((48, 22, 28), "#F5E6CC", "#FFFFFF"),
+}
+bg_rgb, heading_color, body_color = PALETTES.get(visual_theme, PALETTES["navy_gold"])
 
-title_clip = (
-    TextClip(
-        title_text,
-        fontsize=64 if not is_short else 58,
-        color="#F4EAD4",
-        font="DejaVu-Sans-Bold",
-        method="caption",
-        size=(int(width * 0.82), None),
-        align="center",
+
+async def synthesize_slide_audio(text, out_file):
+    comm = edge_tts.Communicate(text, selected_voice, rate="-4%")
+    await comm.save(out_file)
+
+
+slide_clips = []
+audio_clips = []
+
+for i, slide in enumerate(slides_data):
+    slide_audio_path = f"slide_{i}.mp3"
+    asyncio.run(synthesize_slide_audio(slide["narration"], slide_audio_path))
+
+    a_clip = AudioFileClip(slide_audio_path)
+    # Add 0.6s breathing room at the end of each slide
+    slide_dur = a_clip.duration + 0.6
+    audio_clips.append(a_clip)
+
+    # Background layer for this slide
+    if bg_pool:
+        chosen_vid = bg_pool[i % len(bg_pool)]
+        raw_vid = VideoFileClip(chosen_vid).without_audio().resize((width, height))
+        loops = int(slide_dur // raw_vid.duration) + 1
+        looped = concatenate_videoclips([raw_vid] * loops).subclip(0, slide_dur)
+        dimmer = ColorClip(size=(width, height), color=(12, 18, 30)).set_opacity(0.55).set_duration(slide_dur)
+        bg_layer = CompositeVideoClip([looped, dimmer])
+    else:
+        bg_layer = ColorClip(size=(width, height), color=bg_rgb).set_duration(slide_dur)
+
+    heading_clip = (
+        TextClip(
+            slide["heading"].upper(),
+            fontsize=54 if not is_short else 48,
+            color=heading_color,
+            font="DejaVu-Sans-Bold",
+            method="caption",
+            size=(int(width * 0.84), None),
+            align="center",
+        )
+        .set_position(("center", int(height * 0.22)))
+        .set_duration(slide_dur)
     )
-    .set_position(("center", int(height * 0.28)))
-    .set_duration(duration)
-)
 
-verse_clip = (
-    TextClip(
-        verse_text,
-        fontsize=42 if not is_short else 40,
-        color="#FFFFFF",
-        font="DejaVu-Sans",
-        method="caption",
-        size=(int(width * 0.78), None),
-        align="center",
+    body_clip = (
+        TextClip(
+            slide["on_screen_text"],
+            fontsize=42 if not is_short else 38,
+            color=body_color,
+            font="DejaVu-Sans",
+            method="caption",
+            size=(int(width * 0.80), None),
+            align="center",
+        )
+        .set_position(("center", int(height * 0.44)))
+        .set_duration(slide_dur)
     )
-    .set_position(("center", int(height * 0.50)))
-    .set_duration(duration)
-)
 
-final_video = CompositeVideoClip([base_layer, title_clip, verse_clip]).set_audio(audio_clip)
+    composed_slide = CompositeVideoClip([bg_layer, heading_clip, body_clip]).set_audio(
+        a_clip.set_start(0.2)
+    )
+    if i > 0:
+        composed_slide = composed_slide.crossfadein(0.6)
+
+    slide_clips.append(composed_slide)
+
+final_video = concatenate_videoclips(slide_clips, method="compose", padding=-0.6)
+
+# Optional ambient background music track at low volume (-24 dB / ~0.07 volume)
+music_path = os.path.join("assets", "music", music_track) if music_track else ""
+if music_path and os.path.isfile(music_path):
+    bg_music = AudioFileClip(music_path)
+    bg_music = audio_loop(bg_music, duration=final_video.duration).volumex(0.07)
+    mixed_audio = CompositeAudioClip([final_video.audio, bg_music])
+    final_video = final_video.set_audio(mixed_audio)
+
 output_video_path = "final_output.mp4"
 final_video.write_videofile(
     output_video_path,
@@ -181,20 +227,18 @@ final_video.write_videofile(
     threads=4,
     preset="medium",
 )
-print("Video rendering complete.")
 
 # --- 6. UPLOAD & SCHEDULE ON YOUTUBE ---
 yt_creds = UserCredentials.from_authorized_user_info(YOUTUBE_TOKEN_INFO)
 youtube = build("youtube", "v3", credentials=yt_creds)
-
 scheduled_date = str(study.get("Scheduled Date", "")).strip()
 
 body = {
     "snippet": {
-        "title": video_data["youtube_title"][:100],
-        "description": video_data["youtube_description"],
+        "title": storyboard["youtube_title"][:100],
+        "description": storyboard["youtube_description"],
         "tags": ["Bible Study", "Christian Devotional", "Scripture", study.get("category", "Faith")],
-        "categoryId": "22",  # People & Blogs
+        "categoryId": "22",
     },
     "status": {
         "privacyStatus": "private",
@@ -212,12 +256,7 @@ while response_upload is None:
     if status:
         print(f"Upload progress: {int(status.progress() * 100)}%")
 
-video_id = response_upload["id"]
-youtube_url = f"https://youtu.be/{video_id}"
-print(f"Successfully uploaded and scheduled: {youtube_url}")
-
-# --- 7. UPDATE GOOGLE SHEET ---
-# Columns: G (7) = Video Status, J (10) = YouTube URL
+youtube_url = f"https://youtu.be/{response_upload['id']}"
 sheet.update_cell(target_row_index, 7, "Scheduled")
 sheet.update_cell(target_row_index, 10, youtube_url)
-print(f"Updated Row {target_row_index} to 'Scheduled' with URL {youtube_url}.")
+print(f"Completed and scheduled Row {target_row_index}: {youtube_url}")
