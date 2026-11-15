@@ -3,6 +3,7 @@ import time
 import json
 import asyncio
 import smtplib
+from datetime import datetime
 from email.message import EmailMessage
 import gspread
 import edge_tts
@@ -33,6 +34,16 @@ REVIEW_WEBAPP_URL = os.environ.get("REVIEW_WEBAPP_URL", "").strip()
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "").strip()
 SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
+
+
+def parse_sched_timestamp(ts_str):
+    """Parses ISO timestamps (+02:00 SAST or Z UTC) into comparable epoch seconds."""
+    if not ts_str:
+        return float("inf")
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return float("inf")
 
 
 def send_review_notification(row_idx, study_title, youtube_url):
@@ -117,10 +128,10 @@ if not ready_rows:
     print("No rows marked as 'Approved' or 'Ready'. Exiting cleanly.")
     exit(0)
 
-# Prioritizes same-day entries ahead of future queued rows
-ready_rows.sort(key=lambda x: x[0] if x[0] else "9999-12-31T23:59:59Z")
+# Sorts chronologically (+02:00 SAST and Z UTC) so same-day entries run first
+ready_rows.sort(key=lambda x: parse_sched_timestamp(x[0]))
 _, target_row_index, study = ready_rows[0]
-print(f"Rendering Stage 1 for Row {target_row_index}: {study.get('title')}")
+print(f"Rendering Stage 1 for Row {target_row_index} (Scheduled: {study.get('Scheduled Date')}): {study.get('title')}")
 
 # --- 5. READ CREATIVE CONTROL COLUMNS (K–O) ---
 video_format = str(study.get("Video Format", "Devotional")).strip()
@@ -129,19 +140,20 @@ is_short = video_format.lower() == "short"
 creative_brief = str(study.get("Creative Brief", "")).strip()
 slide_breakdown = str(study.get("Slide Breakdown", "")).strip()
 visual_theme = str(study.get("Visual Theme", "navy_gold")).strip().lower()
-voice_choice = str(study.get("Voice Style", "Christopher")).strip().lower()
+voice_choice = str(study.get("Voice Style", "Luke")).strip().lower()
 music_track = str(study.get("Music Track", "")).strip()
 
 VOICE_MAP = {
     "luke": "en-ZA-LukeNeural",                # Warm South African male (Default)
     "leah": "en-ZA-LeahNeural",                # Clear, gentle South African female
-    "christopher": "en-US-ChristopherNeural",  # Deep US male
-    "andrew": "en-US-AndrewNeural",            # Conversational US male
-    "aria": "en-US-AriaNeural",                # Expressive US female
+    "christopher": "en-US-ChristopherNeural",  # Deep, authoritative US male
+    "andrew": "en-US-AndrewNeural",            # Warm, conversational US male
+    "aria": "en-US-AriaNeural",                # Gentle, expressive US female
+    "jenny": "en-US-JennyNeural",              # Clear, natural US female
 }
 selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
 
-# --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI ---
+# --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI (WITH 503 RETRY) ---
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 length_guidance = (
@@ -207,7 +219,7 @@ if response is None:
 
 storyboard = json.loads(response.text)
 slides_data = storyboard.get("slides", [])
-print(f"Generated {len(slides_data)}-slide storyboard.")
+print(f"Generated {len(slides_data)}-slide storyboard using voice {selected_voice}.")
 
 # --- 7. GENERATE PER-SLIDE AUDIO & RENDER MULTI-SLIDE VIDEO ---
 width, height = (1080, 1920) if is_short else (1920, 1080)
@@ -225,9 +237,21 @@ for folder in [theme_dir, fallback_dir]:
         )
 
 PALETTES = {
+    # Original 3 themes
     "navy_gold": ((20, 30, 48), "#F4EAD4", "#FFFFFF"),
     "forest_cream": ((24, 42, 34), "#E9DFC8", "#F8F9FA"),
     "burgundy_warm": ((48, 22, 28), "#F5E6CC", "#FFFFFF"),
+    # 10 expanded themes
+    "sunrise_amber": ((46, 32, 22), "#FCD34D", "#FFFBEB"),
+    "midnight_slate": ((15, 23, 42), "#38BDF8", "#F1F5F9"),
+    "desert_sand": ((54, 45, 36), "#FDE68A", "#FAF5EE"),
+    "royal_purple": ((34, 22, 52), "#E9D5FF", "#FFFFFF"),
+    "olive_grove": ((38, 44, 28), "#E6DFC5", "#FAF9F5"),
+    "ocean_deep": ((16, 42, 48), "#A7F3D0", "#F8FAFC"),
+    "crimson_covenant": ((56, 18, 22), "#F5E6CC", "#FFFDF9"),
+    "sanctuary_bronze": ((44, 34, 24), "#F3E5AB", "#FFFFFF"),
+    "emerald_pasture": ((20, 46, 32), "#FEF08A", "#F8FAFC"),
+    "charcoal_silver": ((26, 28, 32), "#E2E8F0", "#FFFFFF"),
 }
 bg_rgb, heading_color, body_color = PALETTES.get(visual_theme, PALETTES["navy_gold"])
 
