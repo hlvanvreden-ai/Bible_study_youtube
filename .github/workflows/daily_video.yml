@@ -10,7 +10,6 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    environment: production  # Must match your exact Environment name in GitHub Settings
 
     steps:
       - name: Checkout repository
