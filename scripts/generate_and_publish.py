@@ -177,12 +177,16 @@ voice_choice = str(study.get("Voice Style", "Luke")).strip().lower()
 music_track = str(study.get("Music Track", "")).strip()
 
 VOICE_MAP = {
-    "luke": "en-ZA-LukeNeural",                # Warm South African male (Default)
-    "leah": "en-ZA-LeahNeural",                # Clear, gentle South African female
-    "christopher": "en-US-ChristopherNeural",  # Deep, authoritative US male
-    "andrew": "en-US-AndrewNeural",            # Warm, conversational US male
-    "aria": "en-US-AriaNeural",                # Gentle, expressive US female
-    "jenny": "en-US-JennyNeural",              # Clear, natural US female
+    "luke": "en-ZA-LukeNeural",
+    "leah": "en-ZA-LeahNeural",
+    "ryan": "en-GB-RyanNeural",
+    "oliver": "en-GB-OliverNeural",
+    "thomas": "en-GB-ThomasNeural",
+    "alfie": "en-GB-AlfieNeural",
+    "andrew": "en-US-AndrewNeural",
+    "christopher": "en-US-ChristopherNeural",
+    "aria": "en-US-AriaNeural",
+    "jenny": "en-US-JennyNeural",
 }
 selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
 
