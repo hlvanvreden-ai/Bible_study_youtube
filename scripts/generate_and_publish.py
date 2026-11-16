@@ -45,32 +45,65 @@ def parse_sched_timestamp(ts_str):
     except Exception:
         return float("inf")
 
+def send_review_notification(row_idx, study_title, youtube_url, scheduled_sast=""):
+    """Sends a rich HTML alert email with video thumbnail and link to the Multi-Card Review Queue."""
+    review_link = REVIEW_WEBAPP_URL.strip() if REVIEW_WEBAPP_URL else youtube_url
+    video_id = youtube_url.rstrip("/").split("/")[-1].split("?")[0]
+    thumb_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+    print(f"Review dashboard ready: {review_link}")
 
-def send_review_notification(row_idx, study_title, youtube_url):
-    """Sends an email with the Apps Script review portal link (or direct YouTube preview)."""
-    review_link = (
-        f"{REVIEW_WEBAPP_URL}?row={row_idx}" if REVIEW_WEBAPP_URL else youtube_url
-    )
-    print(f"Review link ready: {review_link}")
+    notify_to = NOTIFY_EMAIL.strip()
+    smtp_user = SMTP_USER.strip()
+    smtp_pass = SMTP_PASS.replace(" ", "").strip()
 
-    if not (NOTIFY_EMAIL and SMTP_USER and SMTP_PASS):
+    if not (notify_to and smtp_user and smtp_pass):
         print("SMTP email secrets not set; skipping email dispatch.")
         return
 
     msg = EmailMessage()
-    msg["Subject"] = f"🎬 Review Ready: {study_title} (Row {row_idx})"
-    msg["From"] = SMTP_USER
-    msg["To"] = NOTIFY_EMAIL
+    msg["Subject"] = f"🎬 Approval Required: {study_title} (Row {row_idx})"
+    msg["From"] = smtp_user
+    msg["To"] = notify_to
+
     msg.set_content(
-        f"Your Bible study video '{study_title}' (Row {row_idx}) has been rendered and staged as Unlisted.\n\n"
-        f"Review & Approve/Disapprove here:\n{review_link}\n\n"
-        f"Direct Unlisted YouTube Link:\n{youtube_url}\n"
+        f"Approval required for '{study_title}' (Row {row_idx}).\n"
+        f"Target Publish (SAST): {scheduled_sast}\n\n"
+        f"Open Review Queue: {review_link}\n"
+        f"Direct Unlisted Video: {youtube_url}\n"
     )
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(SMTP_USER, SMTP_PASS)
-        smtp.send_message(msg)
-    print(f"Review notification email sent to {NOTIFY_EMAIL}.")
+    html_body = f"""
+    <div style="font-family: 'Segoe UI', sans-serif; background:#0f172a; color:#f8fafc; padding:24px; border-radius:12px; max-width:560px;">
+      <h2 style="color:#f4ead4; margin-top:0;">🎬 Video Ready for Your Approval</h2>
+      <p style="color:#cbd5e1; font-size:15px; line-height:1.5;">
+        <strong>{study_title}</strong> (Row {row_idx}) has been rendered and staged as Unlisted.<br>
+        <span style="color:#38bdf8;">Target Publish (SAST): {scheduled_sast}</span>
+      </p>
+      <a href="{youtube_url}" style="display:block; margin:16px 0;">
+        <img src="{thumb_url}" alt="Preview Video" style="width:100%; border-radius:8px; border:1px solid #334155;">
+      </a>
+      <div style="margin-top:20px; text-align:center;">
+        <a href="{review_link}" style="background:#16a34a; color:#ffffff; text-decoration:none; padding:14px 24px; border-radius:8px; font-weight:bold; font-size:16px; display:inline-block;">
+          ▶ Open Approval Queue
+        </a>
+      </div>
+      <p style="color:#64748b; font-size:12px; margin-top:18px; text-align:center;">
+        Direct YouTube preview: <a href="{youtube_url}" style="color:#94a3b8;">{youtube_url}</a>
+      </p>
+    </div>
+    """
+    msg.add_alternative(html_body, subtype="html")
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(smtp_user, smtp_pass)
+            smtp.send_message(msg)
+        print(f"HTML review alert sent to {notify_to} via STARTTLS (587).")
+    except Exception as e:
+        print(f"Warning: Email notification failed ({type(e).__name__}: {e}), but video is staged in Pending Review.")
 
 
 # --- 2. CONNECT TO GOOGLE SHEETS & YOUTUBE ---
