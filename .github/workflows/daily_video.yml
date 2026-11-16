@@ -2,7 +2,7 @@ name: Daily Bible Study Video Production
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Runs daily at 04:00 AM UTC
+    - cron: '0 2 * * *'  # Runs daily at 02:00 UTC (04:00 AM SAST)
   repository_dispatch:
     types: [build_daily_video]
   workflow_dispatch:
@@ -10,25 +10,35 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    environment: production  # Must match your exact Environment name in GitHub Settings
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies (FFmpeg & ImageMagick)
+      - name: Install system dependencies (FFmpeg & ImageMagick)
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg imagemagick
-          # Fix ImageMagick security policy for text rendering
-          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@\*"/' /etc/ImageMagick-6/policy.xml
+
+      - name: Fix ImageMagick policy for MoviePy
+        run: |
+          POLICY_FILE=$(find /etc/ImageMagick* -name "policy.xml" 2>/dev/null | head -n 1)
+          if [ -n "$POLICY_FILE" ]; then
+            sudo sed -i 's/none/read,write/g' "$POLICY_FILE"
+            echo "Updated $POLICY_FILE"
+          else
+            echo "No policy.xml found; skipping."
+          fi
 
       - name: Install Python Packages
         run: |
+          pip install --upgrade pip
           pip install google-genai gspread google-auth google-auth-oauthlib google-api-python-client edge-tts moviepy==1.0.3 pillow
 
       - name: Run Production Script
