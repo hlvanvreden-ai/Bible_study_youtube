@@ -276,10 +276,10 @@ Return ONLY valid JSON matching this schema:
 }}
 """
 
-models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
+models_to_try = ["gemini-3.8-flash", "gemini-2.5-pro"]
 response = None
 for attempt in range(1, 6):
-    model_name = models_to_try[0] if attempt <= 3 else models_to_try[1]
+    model_name = models_to_try[0] if attempt <= 4 else models_to_try[1]
     try:
         print(f"Calling Gemini ({model_name}), attempt {attempt}/5...")
         response = client.models.generate_content(
@@ -289,9 +289,10 @@ for attempt in range(1, 6):
         )
         break
     except Exception as e:
-        if any(code in str(e) for code in ("503", "UNAVAILABLE", "429")):
+        err_str = str(e)
+        if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "404", "NOT_FOUND")):
             wait_sec = attempt * 15
-            print(f"Gemini busy ({e}). Retrying in {wait_sec}s...")
+            print(f"Gemini ({model_name}) unavailable ({e}). Retrying in {wait_sec}s...")
             time.sleep(wait_sec)
         else:
             raise
