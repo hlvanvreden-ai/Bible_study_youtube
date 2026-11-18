@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import asyncio
@@ -36,6 +37,8 @@ REVIEW_WEBAPP_URL = os.environ.get("REVIEW_WEBAPP_URL", "").strip()
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "").strip()
 SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
+
+SAST = timezone(timedelta(hours=2))
 
 
 def send_review_notification(row_idx, study_title, youtube_url):
@@ -84,10 +87,22 @@ def send_review_notification(row_idx, study_title, youtube_url):
     print(f"Review notification email sent to {NOTIFY_EMAIL}.")
 
 
+def normalize_image_url(url):
+    """Converts standard Google Drive share links into direct download URLs."""
+    match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", url) or re.search(
+        r"[?&]id=([a-zA-Z0-9_-]+)", url
+    )
+    if "drive.google.com" in url and match:
+        return f"https://drive.google.com/uc?export=download&id={match.group(1)}"
+    return url
+
+
 def prepare_background_image(source_ref, idx, target_w, target_h):
     """Downloads or loads an image, center-crops to target aspect ratio, and adds a dark sanctuary vignette."""
     raw_path = f"bg_raw_{idx}.jpg"
     processed_path = f"bg_clean_{idx}.png"
+
+    source_ref = normalize_image_url(source_ref)
 
     if source_ref.startswith(("http://", "https://")):
         req = urllib.request.Request(source_ref, headers={"User-Agent": "Mozilla/5.0"})
@@ -161,14 +176,13 @@ for idx, row in enumerate(records, start=2):
             continue
 
         # Ensure Scheduled Date is at least 20 mins in the future (SAST +02:00)
-        sast = timezone(timedelta(hours=2))
-        now_sast = datetime.now(sast)
+        now_sast = datetime.now(SAST)
         min_valid_publish = now_sast + timedelta(minutes=20)
 
         try:
             parsed_dt = datetime.fromisoformat(scheduled_date)
             if parsed_dt.tzinfo is None:
-                parsed_dt = parsed_dt.replace(tzinfo=sast)
+                parsed_dt = parsed_dt.replace(tzinfo=SAST)
         except ValueError:
             parsed_dt = min_valid_publish
 
@@ -236,7 +250,7 @@ VOICE_MAP = {
 }
 selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
 
-# --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI (5-ATTEMPT RETRY) ---
+# --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI (MULTI-MODEL RETRY + FALLBACK) ---
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 length_guidance = (
@@ -276,12 +290,13 @@ Return ONLY valid JSON matching this schema:
 }}
 """
 
-models_to_try = ["gemini-3.8-flash", "gemini-2.5-pro"]
+models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-2.5-flash-lite"]
 response = None
-for attempt in range(1, 6):
-    model_name = models_to_try[0] if attempt <= 4 else models_to_try[1]
+
+for attempt in range(1, 7):
+    model_name = models_to_try[(attempt - 1) % len(models_to_try)]
     try:
-        print(f"Calling Gemini ({model_name}), attempt {attempt}/5...")
+        print(f"Calling Gemini ({model_name}), attempt {attempt}/6...")
         response = client.models.generate_content(
             model=model_name,
             contents=prompt,
@@ -291,19 +306,50 @@ for attempt in range(1, 6):
     except Exception as e:
         err_str = str(e)
         if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "404", "NOT_FOUND")):
-            wait_sec = attempt * 15
+            wait_sec = min(attempt * 10, 45)
             print(f"Gemini ({model_name}) unavailable ({e}). Retrying in {wait_sec}s...")
             time.sleep(wait_sec)
         else:
             raise
 
-if response is None:
-    raise RuntimeError("Gemini API remained unavailable after 5 retry attempts.")
+if response is not None:
+    storyboard = json.loads(response.text)
+else:
+    print("All Gemini models temporarily busy; building structured storyboard directly from sheet study fields.")
+    title_clean = str(study.get("title", "Daily Bible Study")).strip()
+    scripture_clean = str(study.get("scripture", "")).strip()
+    summary_clean = str(study.get("summary", "")).strip()
+    details_clean = re.sub(r"<[^>]+>", " ", str(study.get("details", ""))).strip()
+    storyboard = {
+        "youtube_title": f"{title_clean} | {scripture_clean}"[:100],
+        "youtube_description": f"Scripture: {scripture_clean}\n\n{summary_clean}\n\n{details_clean}",
+        "slides": [
+            {
+                "heading": title_clean.upper(),
+                "on_screen_text": f"Scripture Focus: {scripture_clean}",
+                "narration": f"Welcome to today's Bible study on {title_clean}. Our anchor scripture is {scripture_clean}. {summary_clean}",
+            },
+            {
+                "heading": "SCRIPTURE ANCHOR",
+                "on_screen_text": scripture_clean,
+                "narration": f"Let us anchor our hearts in {scripture_clean}. {summary_clean}",
+            },
+            {
+                "heading": "CORE TEACHING",
+                "on_screen_text": summary_clean[:140],
+                "narration": details_clean[:900] if details_clean else summary_clean,
+            },
+            {
+                "heading": "CLOSING PRAYER",
+                "on_screen_text": "Walk in the truth of God's Word today.",
+                "narration": "Father, thank You for Your living Word. Anchor our hearts in Your truth and grace today. In Jesus' name, Amen.",
+            },
+        ],
+    }
 
-storyboard = json.loads(response.text)
 slides_data = storyboard.get("slides", [])
 total_slides = len(slides_data)
-print(f"Generated {total_slides}-slide storyboard.")
+print(f"Prepared {total_slides}-slide storyboard.")
 
 # --- 7. GENERATE PER-SLIDE AUDIO & CINEMATIC KEN BURNS SLIDES ---
 width, height = (1080, 1920) if is_short else (1920, 1080)
@@ -487,8 +533,4 @@ video_id = response_upload["id"]
 youtube_url = f"https://youtu.be/{video_id}"
 print(f"Uploaded unlisted draft for review: {youtube_url}")
 
-# --- 9. UPDATE SHEET TO 'PENDING REVIEW' & NOTIFY ---
-sheet.update_cell(target_row_index, 7, "Pending Review")
-sheet.update_cell(target_row_index, 10, youtube_url)
-send_review_notification(target_row_index, study.get("title", "Untitled"), youtube_url)
-print(f"Row {target_row_index} updated to 'Pending Review'.")
+# --- 9. UPDATE SHEET TO '
