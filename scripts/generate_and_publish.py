@@ -37,8 +37,6 @@ NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "").strip()
 SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
 
-SAST = timezone(timedelta(hours=2))
-
 
 def send_review_notification(row_idx, study_title, youtube_url):
     """Sends an HTML email alert with the Apps Script Review Portal link."""
@@ -162,21 +160,23 @@ for idx, row in enumerate(records, start=2):
             print(f"Row {idx} is marked 'Approved' but has no YouTube URL. Skipping.")
             continue
 
-        # Auto-bump expired timestamps to now + 30 mins SAST so YouTube never throws invalidPublishAt
-        now_sast = datetime.now(SAST)
-        min_valid = now_sast + timedelta(minutes=20)
+        # Ensure Scheduled Date is at least 20 mins in the future (SAST +02:00)
+        sast = timezone(timedelta(hours=2))
+        now_sast = datetime.now(sast)
+        min_valid_publish = now_sast + timedelta(minutes=20)
+
         try:
             parsed_dt = datetime.fromisoformat(scheduled_date)
             if parsed_dt.tzinfo is None:
-                parsed_dt = parsed_dt.replace(tzinfo=SAST)
+                parsed_dt = parsed_dt.replace(tzinfo=sast)
         except ValueError:
-            parsed_dt = min_valid
+            parsed_dt = min_valid_publish
 
-        if parsed_dt < min_valid:
+        if parsed_dt < min_valid_publish:
             parsed_dt = now_sast + timedelta(minutes=30)
             scheduled_date = parsed_dt.strftime("%Y-%m-%dT%H:%M:%S+02:00")
             sheet.update_cell(idx, 8, scheduled_date)
-            print(f"Auto-adjusted expired Scheduled Date on Row {idx} to {scheduled_date}")
+            print(f"Original Scheduled Date was in the past; auto-adjusted to {scheduled_date}")
 
         video_id = yt_url.rstrip("/").split("/")[-1].split("?")[0]
         print(f"Publishing Approved Row {idx} (Video ID: {video_id}) for {scheduled_date}...")
@@ -351,7 +351,6 @@ for i, slide in enumerate(slides_data):
             processed_img = prepare_background_image(chosen_img_ref, i, width, height)
             if processed_img:
                 base_img = ImageClip(processed_img).set_duration(slide_dur)
-                # Gentle 8% slow zoom-in across the slide duration
                 zoomed_img = base_img.resize(lambda t: 1.0 + 0.08 * (t / slide_dur))
                 bg_layer = CompositeVideoClip(
                     [zoomed_img.set_position("center")], size=(width, height)
