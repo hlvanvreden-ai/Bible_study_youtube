@@ -1,46 +1,48 @@
 name: Daily Bible Study Video Production
 
 on:
-  schedule:
-    - cron: '0 2 * * *'  # Runs daily at 02:00 UTC (04:00 AM SAST)
   repository_dispatch:
-    types: [build_daily_video]
+    types: [fetch_notebook_studies, build_daily_video]
   workflow_dispatch:
+    inputs:
+      action_mode:
+        description: "Mode: fetch_and_build | fetch_only | build_only"
+        required: false
+        default: "fetch_and_build"
 
 jobs:
-  build-and-publish:
+  run_pipeline:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
-      - name: Install system dependencies (FFmpeg & ImageMagick)
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
+          sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick
+          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-6/policy.xml || true
+          pip install -r requirements.txt
 
-      - name: Fix ImageMagick policy for MoviePy
+      - name: Configure NotebookLM Auth
+        if: github.event.action == 'fetch_notebook_studies' || github.event.inputs.action_mode != 'build_only'
         run: |
-          POLICY_FILE=$(find /etc/ImageMagick* -name "policy.xml" 2>/dev/null | head -n 1)
-          if [ -n "$POLICY_FILE" ]; then
-            sudo sed -i 's/none/read,write/g' "$POLICY_FILE"
-            echo "Updated $POLICY_FILE"
-          else
-            echo "No policy.xml found; skipping."
-          fi
+          mkdir -p ~/.notebooklm
+          echo '${{ secrets.NOTEBOOKLM_STORAGE_JSON }}' > ~/.notebooklm/storage_state.json
 
-      - name: Install Python Packages
-        run: |
-          pip install --upgrade pip
-          pip install google-genai gspread google-auth google-auth-oauthlib google-api-python-client edge-tts moviepy==1.0.3 pillow
+      - name: Step 1 - Fetch Missing Studies from NotebookLM
+        if: github.event.action == 'fetch_notebook_studies' || github.event.inputs.action_mode != 'build_only'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          NOTEBOOK_TITLE: "Bible studies"
+        run: python scripts/fetch_from_notebook.py
 
-      - name: Run Production Script
+      - name: Step 2 - Render Video (Stage 1) or Schedule Approved Video (Stage 2)
+        if: github.event.action == 'build_daily_video' || github.event.inputs.action_mode != 'fetch_only'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
