@@ -111,6 +111,7 @@ for attempt in range(1, 7):
         )
         break
     except Exception as e:
+        print(f"Attempt {attempt} ({model_name}) failed: {e}")
         if any(code in str(e) for code in ("503", "UNAVAILABLE", "429", "404", "NOT_FOUND")):
             time.sleep(min(attempt * 10, 45))
         else:
