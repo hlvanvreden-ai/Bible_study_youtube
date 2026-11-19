@@ -36,25 +36,35 @@ print(f"Loaded {len(existing_titles)} existing studies from 'Bible study list'."
 
 
 async def fetch_notebook_sources():
-    """Connects to NotebookLM and retrieves source titles and text from the 'Bible studies' notebook."""
+    """Connects to NotebookLM and retrieves only the most recent Bible studies without exceeding RPC size caps."""
     async with await NotebookLMClient.from_storage() as client:
         notebooks = await client.notebooks.list()
         target_nb = next(
-            (nb for nb in notebooks if nb.title.strip().lower() == NOTEBOOK_TITLE.lower()),
+            (
+                nb
+                for nb in notebooks
+                if "bible study" in nb.title.lower() and "youtube" not in nb.title.lower()
+            ),
             None,
         )
         if not target_nb:
-            raise RuntimeError(f"Notebook '{NOTEBOOK_TITLE}' not found in NotebookLM.")
+            raise RuntimeError(
+                f"Notebook '{NOTEBOOK_TITLE}' not found. Available: {[nb.title for nb in notebooks]}"
+            )
 
-        sources = await client.sources.list(target_nb.id)
-        print(f"Found {len(sources)} sources in NotebookLM '{target_nb.title}'.")
+        print(f"Connected to notebook: '{target_nb.title}' (ID: {target_nb.id})")
 
-        # Ask NotebookLM to list all distinct Bible study topics/titles in the notebook
+        # Skip client.sources.list() to avoid the 268 MB RPC payload limit on large notebooks;
+        # query only the 3 most recent studies via chat.ask() instead.
         ask_resp = await client.chat.ask(
             target_nb.id,
-            "List every distinct Bible study title, category, primary scripture references, "
-            "concise summary, and full structured HTML teaching notes contained in this notebook.",
+            "Provide ONLY the 3 most recent Bible studies created in this notebook "
+            "(including yesterday's study 'He First Loved Us...'). "
+            "For each of those 3 studies, provide: exact Title, Category, primary Scripture references, "
+            "a concise Summary, and the complete structured HTML teaching notes. "
+            "Do NOT include older studies beyond the 3 most recent.",
         )
+        sources = []
         return sources, ask_resp.answer
 
 
