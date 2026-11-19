@@ -42,7 +42,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          NOTEBOOK_TITLE: "Bible studies"
+          NOTEBOOK_TITLE: "Bible studies YouTube"
         run: python scripts/fetch_from_notebook.py
 
       - name: Step 2 - Render Video (Stage 1) or Schedule Approved Video (Stage 2)
