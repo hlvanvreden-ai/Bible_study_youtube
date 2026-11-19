@@ -97,7 +97,7 @@ Return ONLY a valid JSON object matching this exact schema:
 If all studies are already in the sheet, return {{"new_studies": []}}.
 """
 
-models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-2.5-flash-lite"]
+models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
 response = None
 
 for attempt in range(1, 7):
