@@ -1,3 +1,4 @@
+import functools
 import io
 import os
 import re
@@ -27,6 +28,9 @@ from moviepy.editor import (
     concatenate_videoclips,
 )
 from moviepy.audio.fx.all import audio_loop
+
+# Ensure live unbuffered progress logs in GitHub Actions
+print = functools.partial(print, flush=True)
 
 # --- 1. LOAD ENVIRONMENT SECRETS ---
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -391,23 +395,23 @@ async def synthesize_slide_audio(text, out_file):
 slide_clips = []
 
 for i, slide in enumerate(slides_data):
+    print(f"[{i+1}/{len(slides_data)}] Synthesizing audio & building slide: {slide['heading']}...")
     slide_audio_path = f"slide_{i}.mp3"
     asyncio.run(synthesize_slide_audio(slide["narration"], slide_audio_path))
 
     a_clip = AudioFileClip(slide_audio_path)
     slide_dur = a_clip.duration + 0.6
 
-    # Priority 1: Rotated Google Drive Background Image (Column P) with Ken Burns slow zoom
+    # Priority 1: Rotated Google Drive Background Image (Column P) - fast static resize
     if local_bg_image and os.path.isfile(local_bg_image):
         base_img = ImageClip(local_bg_image).resize((width, height)).set_duration(slide_dur)
-        zoomed_img = base_img.resize(lambda t: 1.0 + 0.05 * (t / max(slide_dur, 0.1)))
         dimmer = (
             ColorClip(size=(width, height), color=(12, 18, 30))
             .set_opacity(0.50)
             .set_duration(slide_dur)
         )
         bg_layer = CompositeVideoClip(
-            [zoomed_img.set_position("center"), dimmer], size=(width, height)
+            [base_img.set_position("center"), dimmer], size=(width, height)
         )
     # Priority 2: Local themed video loop if present
     elif bg_pool:
@@ -474,13 +478,14 @@ else:
     print("No background soundtrack file resolved; rendering voiceover only.")
 
 output_video_path = "final_output.mp4"
+print("Encoding final MP4 video...")
 final_video.write_videofile(
     output_video_path,
     fps=24,
     codec="libx264",
     audio_codec="aac",
     threads=4,
-    preset="medium",
+    preset="ultrafast",
 )
 print("Multi-slide video rendering complete.")
 
