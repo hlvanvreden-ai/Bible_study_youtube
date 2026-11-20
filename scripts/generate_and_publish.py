@@ -66,7 +66,7 @@ def ensure_future_sast_iso(raw_sched_str):
 
 
 def send_review_notification(row_idx, study_title, youtube_url):
-    """Sends an HTML/text review alert via Gmail STARTTLS (port 587)."""
+    """Sends a review alert via Gmail STARTTLS (port 587)."""
     review_link = f"{REVIEW_WEBAPP_URL}?row={row_idx}" if REVIEW_WEBAPP_URL else youtube_url
     print(f"Review portal ready: {review_link}")
 
@@ -119,7 +119,6 @@ def download_drive_asset(file_ref, out_prefix):
     if not val or val.lower() == "none":
         return ""
 
-    # If already a valid local repo file, return as-is
     if os.path.isfile(val):
         return val
 
@@ -239,7 +238,6 @@ print(
 local_bg_image = download_drive_asset(bg_image_ref, "drive_bg_image")
 local_music_path = download_drive_asset(music_track_ref, "drive_music_track")
 
-# Fallback to repo assets/music/ if a local filename was supplied
 if not local_music_path and music_track_ref:
     repo_music = os.path.join("assets", "music", music_track_ref)
     if os.path.isfile(repo_music):
@@ -254,6 +252,15 @@ VOICE_MAP = {
     "jenny": "en-US-JennyNeural",              # Clear US female
 }
 selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
+
+VOICE_FALLBACKS = {
+    "en-ZA-LukeNeural": "en-US-ChristopherNeural",
+    "en-ZA-LeahNeural": "en-US-AriaNeural",
+    "en-US-ChristopherNeural": "en-US-AndrewNeural",
+    "en-US-AndrewNeural": "en-US-ChristopherNeural",
+    "en-US-AriaNeural": "en-US-JennyNeural",
+    "en-US-JennyNeural": "en-US-AriaNeural",
+}
 
 # --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI (WITH RETRY) ---
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -356,144 +363,24 @@ PALETTES = {
 bg_rgb, heading_color, body_color = PALETTES.get(visual_theme, PALETTES["navy_gold"])
 
 
+def clean_narration_for_tts(raw_text):
+    """Strips markdown, brackets, or empty strings that can trigger NoAudioReceived."""
+    text = re.sub(r"[*_#`~<>]", "", str(raw_text or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if text else "Let us reflect on God's Word together."
+
+
 async def synthesize_slide_audio(text, out_file):
-    comm = edge_tts.Communicate(text, selected_voice, rate="-4%")
-    await comm.save(out_file)
+    cleaned = clean_narration_for_tts(text)
+    fallback_voice = VOICE_FALLBACKS.get(selected_voice, "en-US-ChristopherNeural")
 
-
-slide_clips = []
-
-for i, slide in enumerate(slides_data):
-    slide_audio_path = f"slide_{i}.mp3"
-    asyncio.run(synthesize_slide_audio(slide["narration"], slide_audio_path))
-
-    a_clip = AudioFileClip(slide_audio_path)
-    slide_dur = a_clip.duration + 0.6
-
-    # Priority 1: Rotated Google Drive Background Image (Column P) with Ken Burns slow zoom
-    if local_bg_image and os.path.isfile(local_bg_image):
-        base_img = ImageClip(local_bg_image).resize((width, height)).set_duration(slide_dur)
-        zoomed_img = base_img.resize(lambda t: 1.0 + 0.05 * (t / max(slide_dur, 0.1)))
-        dimmer = (
-            ColorClip(size=(width, height), color=(12, 18, 30))
-            .set_opacity(0.50)
-            .set_duration(slide_dur)
-        )
-        bg_layer = CompositeVideoClip(
-            [zoomed_img.set_position("center"), dimmer], size=(width, height)
-        )
-    # Priority 2: Local themed video loop if present
-    elif bg_pool:
-        chosen_vid = bg_pool[i % len(bg_pool)]
-        raw_vid = VideoFileClip(chosen_vid).without_audio().resize((width, height))
-        loops = int(slide_dur // raw_vid.duration) + 1
-        looped = concatenate_videoclips([raw_vid] * loops).subclip(0, slide_dur)
-        dimmer = (
-            ColorClip(size=(width, height), color=(12, 18, 30))
-            .set_opacity(0.55)
-            .set_duration(slide_dur)
-        )
-        bg_layer = CompositeVideoClip([looped, dimmer])
-    # Priority 3: Solid color palette fallback
-    else:
-        bg_layer = ColorClip(size=(width, height), color=bg_rgb).set_duration(slide_dur)
-
-    heading_clip = (
-        TextClip(
-            slide["heading"].upper(),
-            fontsize=54 if not is_short else 48,
-            color=heading_color,
-            font="DejaVu-Sans-Bold",
-            method="caption",
-            size=(int(width * 0.84), None),
-            align="center",
-        )
-        .set_position(("center", int(height * 0.22)))
-        .set_duration(slide_dur)
-    )
-
-    body_clip = (
-        TextClip(
-            slide["on_screen_text"],
-            fontsize=42 if not is_short else 38,
-            color=body_color,
-            font="DejaVu-Sans",
-            method="caption",
-            size=(int(width * 0.80), None),
-            align="center",
-        )
-        .set_position(("center", int(height * 0.44)))
-        .set_duration(slide_dur)
-    )
-
-    composed_slide = CompositeVideoClip([bg_layer, heading_clip, body_clip]).set_audio(
-        a_clip.set_start(0.2)
-    )
-    if i > 0:
-        composed_slide = composed_slide.crossfadein(0.6)
-
-    slide_clips.append(composed_slide)
-
-final_video = concatenate_videoclips(slide_clips, method="compose", padding=-0.6)
-
-# Mix rotated Google Drive ambient soundtrack (Column O)
-if local_music_path and os.path.isfile(local_music_path):
-    print(f"Mixing background soundtrack: {local_music_path}")
-    bg_music = AudioFileClip(local_music_path)
-    bg_music = audio_loop(bg_music, duration=final_video.duration).volumex(0.12)
-    mixed_audio = CompositeAudioClip([final_video.audio, bg_music])
-    final_video = final_video.set_audio(mixed_audio)
-else:
-    print("No background soundtrack file resolved; rendering voiceover only.")
-
-output_video_path = "final_output.mp4"
-final_video.write_videofile(
-    output_video_path,
-    fps=24,
-    codec="libx264",
-    audio_codec="aac",
-    threads=4,
-    preset="medium",
-)
-print("Multi-slide video rendering complete.")
-
-# --- 8. UPLOAD TO YOUTUBE AS 'UNLISTED' FOR REVIEW ---
-category_val = str(study.get("Category") or study.get("category") or "Faith").strip()
-body = {
-    "snippet": {
-        "title": storyboard["youtube_title"][:100],
-        "description": storyboard["youtube_description"],
-        "tags": [
-            "Bible Study",
-            "Christian Devotional",
-            "Scripture",
-            category_val,
-        ],
-        "categoryId": "22",
-    },
-    "status": {
-        "privacyStatus": "unlisted",
-        "selfDeclaredMadeForKids": False,
-    },
-}
-
-media = MediaFileUpload(
-    output_video_path, chunksize=-1, resumable=True, mimetype="video/mp4"
-)
-request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-
-response_upload = None
-while response_upload is None:
-    status, response_upload = request.next_chunk()
-    if status:
-        print(f"Upload progress: {int(status.progress() * 100)}%")
-
-video_id = response_upload["id"]
-youtube_url = f"https://youtu.be/{video_id}"
-print(f"Uploaded unlisted draft for review: {youtube_url}")
-
-# --- 9. UPDATE SHEET TO 'PENDING REVIEW' & NOTIFY ---
-sheet.update_cell(target_row_index, 7, "Pending Review")
-sheet.update_cell(target_row_index, 10, youtube_url)
-send_review_notification(target_row_index, study_title, youtube_url)
-print(f"Row {target_row_index} updated to 'Pending Review'.")
+    for attempt in range(1, 5):
+        voice_to_use = selected_voice if attempt <= 2 else fallback_voice
+        try:
+            comm = edge_tts.Communicate(cleaned, voice_to_use, rate="-4%")
+            await comm.save(out_file)
+            if os.path.isfile(out_file) and os.path.getsize(out_file) > 0:
+                return
+        except Exception as e:
+            print(f"TTS attempt {attempt}/4 ({voice_to_use}) failed: {e}")
+            await asyncio.sleep(attempt * 2
