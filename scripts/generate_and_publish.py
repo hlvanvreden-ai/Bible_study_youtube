@@ -383,4 +383,144 @@ async def synthesize_slide_audio(text, out_file):
                 return
         except Exception as e:
             print(f"TTS attempt {attempt}/4 ({voice_to_use}) failed: {e}")
-            await asyncio.sleep(attempt * 2
+            await asyncio.sleep(attempt * 2)
+
+    raise RuntimeError(f"edge-tts failed after 4 attempts for slide text: {cleaned[:60]}...")
+
+
+slide_clips = []
+
+for i, slide in enumerate(slides_data):
+    slide_audio_path = f"slide_{i}.mp3"
+    asyncio.run(synthesize_slide_audio(slide["narration"], slide_audio_path))
+
+    a_clip = AudioFileClip(slide_audio_path)
+    slide_dur = a_clip.duration + 0.6
+
+    # Priority 1: Rotated Google Drive Background Image (Column P) with Ken Burns slow zoom
+    if local_bg_image and os.path.isfile(local_bg_image):
+        base_img = ImageClip(local_bg_image).resize((width, height)).set_duration(slide_dur)
+        zoomed_img = base_img.resize(lambda t: 1.0 + 0.05 * (t / max(slide_dur, 0.1)))
+        dimmer = (
+            ColorClip(size=(width, height), color=(12, 18, 30))
+            .set_opacity(0.50)
+            .set_duration(slide_dur)
+        )
+        bg_layer = CompositeVideoClip(
+            [zoomed_img.set_position("center"), dimmer], size=(width, height)
+        )
+    # Priority 2: Local themed video loop if present
+    elif bg_pool:
+        chosen_vid = bg_pool[i % len(bg_pool)]
+        raw_vid = VideoFileClip(chosen_vid).without_audio().resize((width, height))
+        loops = int(slide_dur // raw_vid.duration) + 1
+        looped = concatenate_videoclips([raw_vid] * loops).subclip(0, slide_dur)
+        dimmer = (
+            ColorClip(size=(width, height), color=(12, 18, 30))
+            .set_opacity(0.55)
+            .set_duration(slide_dur)
+        )
+        bg_layer = CompositeVideoClip([looped, dimmer])
+    # Priority 3: Solid color palette fallback
+    else:
+        bg_layer = ColorClip(size=(width, height), color=bg_rgb).set_duration(slide_dur)
+
+    heading_clip = (
+        TextClip(
+            slide["heading"].upper(),
+            fontsize=54 if not is_short else 48,
+            color=heading_color,
+            font="DejaVu-Sans-Bold",
+            method="caption",
+            size=(int(width * 0.84), None),
+            align="center",
+        )
+        .set_position(("center", int(height * 0.22)))
+        .set_duration(slide_dur)
+    )
+
+    body_clip = (
+        TextClip(
+            slide["on_screen_text"],
+            fontsize=42 if not is_short else 38,
+            color=body_color,
+            font="DejaVu-Sans",
+            method="caption",
+            size=(int(width * 0.80), None),
+            align="center",
+        )
+        .set_position(("center", int(height * 0.44)))
+        .set_duration(slide_dur)
+    )
+
+    composed_slide = CompositeVideoClip([bg_layer, heading_clip, body_clip]).set_audio(
+        a_clip.set_start(0.2)
+    )
+    if i > 0:
+        composed_slide = composed_slide.crossfadein(0.6)
+
+    slide_clips.append(composed_slide)
+
+final_video = concatenate_videoclips(slide_clips, method="compose", padding=-0.6)
+
+# Mix rotated Google Drive ambient soundtrack (Column O)
+if local_music_path and os.path.isfile(local_music_path):
+    print(f"Mixing background soundtrack: {local_music_path}")
+    bg_music = AudioFileClip(local_music_path)
+    bg_music = audio_loop(bg_music, duration=final_video.duration).volumex(0.12)
+    mixed_audio = CompositeAudioClip([final_video.audio, bg_music])
+    final_video = final_video.set_audio(mixed_audio)
+else:
+    print("No background soundtrack file resolved; rendering voiceover only.")
+
+output_video_path = "final_output.mp4"
+final_video.write_videofile(
+    output_video_path,
+    fps=24,
+    codec="libx264",
+    audio_codec="aac",
+    threads=4,
+    preset="medium",
+)
+print("Multi-slide video rendering complete.")
+
+# --- 8. UPLOAD TO YOUTUBE AS 'UNLISTED' FOR REVIEW ---
+category_val = str(study.get("Category") or study.get("category") or "Faith").strip()
+body = {
+    "snippet": {
+        "title": storyboard["youtube_title"][:100],
+        "description": storyboard["youtube_description"],
+        "tags": [
+            "Bible Study",
+            "Christian Devotional",
+            "Scripture",
+            category_val,
+        ],
+        "categoryId": "22",
+    },
+    "status": {
+        "privacyStatus": "unlisted",
+        "selfDeclaredMadeForKids": False,
+    },
+}
+
+media = MediaFileUpload(
+    output_video_path, chunksize=-1, resumable=True, mimetype="video/mp4"
+)
+request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+response_upload = None
+while response_upload is None:
+    status, response_upload = request.next_chunk()
+    if status:
+        print(f"Upload progress: {int(status.progress() * 100)}%")
+
+video_id = response_upload["id"]
+youtube_url = f"https://youtu.be/{video_id}"
+print(f"Uploaded unlisted draft for review: {youtube_url}")
+
+# --- 9. UPDATE SHEET TO 'PENDING REVIEW' & NOTIFY ---
+sheet.update_cell(target_row_index, 7, "Pending Review")
+sheet.update_cell(target_row_index, 10, youtube_url)
+send_review_notification(target_row_index, study_title, youtube_url)
+print(f"Row {target_row_index} updated to 'Pending Review'.")
