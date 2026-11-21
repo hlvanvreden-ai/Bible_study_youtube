@@ -15,6 +15,8 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 NOTEBOOK_TITLE = os.environ.get("NOTEBOOK_TITLE", "Bible studies").strip()
 
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
 # --- 2. CONNECT TO GOOGLE SHEETS ---
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
