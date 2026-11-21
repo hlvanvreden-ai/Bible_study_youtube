@@ -32,6 +32,7 @@ print = functools.partial(print, flush=True)
 # --- 1. LOAD ENVIRONMENT SECRETS ---
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+print("Active Service Account Email:", SERVICE_ACCOUNT_INFO.get("client_email"))
 YOUTUBE_TOKEN_INFO = json.loads(os.environ["YOUTUBE_TOKEN_JSON"])
 
 REVIEW_WEBAPP_URL = os.environ.get("REVIEW_WEBAPP_URL", "").strip()
