@@ -122,7 +122,7 @@ for attempt in range(1, 7):
         print(f"Extracting new studies via {model_name} (attempt {attempt}/6)...")
         response = client.models.generate_content(
             model=model_name,
-            contents=prompt,
+            contents=extraction_prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
         break
