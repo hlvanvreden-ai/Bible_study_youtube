@@ -24,12 +24,9 @@ from moviepy.editor import (
     CompositeVideoClip,
     ImageClip,
     TextClip,
-    VideoFileClip,
-    concatenate_videoclips,
 )
 from moviepy.audio.fx.all import audio_loop
 
-# Ensure live unbuffered progress logs in GitHub Actions
 print = functools.partial(print, flush=True)
 
 # --- 1. LOAD ENVIRONMENT SECRETS ---
@@ -46,10 +43,7 @@ SAST_TZ = timezone(timedelta(hours=2))
 
 
 def ensure_future_sast_iso(raw_sched_str):
-    """
-    Ensures Scheduled Date is a valid future ISO-8601 timestamp in SAST (+02:00).
-    If blank or already in the past when approved, bumps to now + 30 minutes SAST.
-    """
+    """Ensures Scheduled Date is a valid future ISO-8601 timestamp in SAST (+02:00)."""
     now_sast = datetime.now(SAST_TZ)
     min_future = now_sast + timedelta(minutes=15)
 
@@ -115,14 +109,10 @@ youtube = build("youtube", "v3", credentials=yt_creds)
 
 
 def download_drive_asset(file_ref, out_prefix):
-    """
-    Accepts a Google Drive File ID, share URL, or exact filename in Drive,
-    downloads it to the GitHub Actions VM, and returns the local file path.
-    """
+    """Downloads a Google Drive File ID, share URL, or exact filename to the runner VM."""
     val = str(file_ref or "").strip()
     if not val or val.lower() == "none":
         return ""
-
     if os.path.isfile(val):
         return val
 
@@ -221,39 +211,29 @@ if not ready_rows:
 ready_rows.sort(key=lambda x: x[0] if x[0] else "9999-12-31T23:59:59+02:00")
 _, target_row_index, study = ready_rows[0]
 study_title = str(study.get("Title") or study.get("title") or "Untitled Study").strip()
-print(f"Rendering Stage 1 for Row {target_row_index}: {study_title}")
+study_scripture = str(study.get("Scripture") or study.get("scripture") or "").strip()
+print(f"Rendering Single-Slide Stage 1 for Row {target_row_index}: {study_title}")
 
-# --- 5. READ CREATIVE CONTROL COLUMNS (K–P) & DOWNLOAD DRIVE MEDIA ---
+# --- 5. READ CREATIVE CONTROLS & DOWNLOAD ROTATED DRIVE MEDIA ---
 video_format = str(study.get("Video Format", "Devotional")).strip()
 is_short = video_format.lower() == "short"
 
 creative_brief = str(study.get("Creative Brief", "")).strip()
-slide_breakdown = str(study.get("Slide Breakdown", "")).strip()
 visual_theme = str(study.get("Visual Theme", "navy_gold")).strip().lower()
 voice_choice = str(study.get("Voice Style", "Luke")).strip().lower()
 music_track_ref = str(study.get("Music Track", "")).strip()
 bg_image_ref = str(study.get("Background Image", "")).strip()
 
-print(
-    f"Creative Config -> Theme: '{visual_theme}' | Voice: '{voice_choice}' | "
-    f"Music Ref: '{music_track_ref}' | BgImage Ref: '{bg_image_ref}'"
-)
-
 local_bg_image = download_drive_asset(bg_image_ref, "drive_bg_image")
 local_music_path = download_drive_asset(music_track_ref, "drive_music_track")
 
-if not local_music_path and music_track_ref:
-    repo_music = os.path.join("assets", "music", music_track_ref)
-    if os.path.isfile(repo_music):
-        local_music_path = repo_music
-
 VOICE_MAP = {
-    "luke": "en-ZA-LukeNeural",                # South African male
-    "leah": "en-ZA-LeahNeural",                # South African female
-    "christopher": "en-US-ChristopherNeural",  # Deep US male
-    "andrew": "en-US-AndrewNeural",            # Warm US male
-    "aria": "en-US-AriaNeural",                # Gentle US female
-    "jenny": "en-US-JennyNeural",              # Clear US female
+    "luke": "en-ZA-LukeNeural",
+    "leah": "en-ZA-LeahNeural",
+    "christopher": "en-US-ChristopherNeural",
+    "andrew": "en-US-AndrewNeural",
+    "aria": "en-US-AriaNeural",
+    "jenny": "en-US-JennyNeural",
 }
 selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
 
@@ -266,47 +246,46 @@ VOICE_FALLBACKS = {
     "en-US-JennyNeural": "en-US-AriaNeural",
 }
 
-# --- 6. GENERATE MULTI-SLIDE STORYBOARD WITH GEMINI (WITH RETRY) ---
+# --- 6. GENERATE SPOKEN DEVOTIONAL SCRIPT WITH GEMINI (WITH RETRY) ---
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 length_guidance = (
-    "45 to 55 seconds total (roughly 115-135 words across 3 slides)."
+    "45 to 55 seconds (roughly 115-135 words)."
     if is_short
-    else "3 to 4 minutes total (roughly 450-550 words across 5 distinct slides)."
+    else "3 to 4 minutes (roughly 450-550 words)."
 )
 
 prompt = f"""
-You are a reverent, Christ-centered Bible teacher and video director creating a {video_format} video.
-Convert the study below into a multi-slide storyboard with spoken narration for each slide.
+You are a reverent, Christ-centered Bible teacher creating a {video_format} audio devotional.
+Write a cohesive, warm spoken script based on the study below.
 
-Creative Director Instructions: {creative_brief if creative_brief else "Warm, reverent, clear teaching."}
-Requested Slide Structure: {slide_breakdown if slide_breakdown else "Slide 1: Hook & Title | Slide 2: Scripture Anchor | Slide 3: Core Teaching | Slide 4: Daily Application | Slide 5: Closing Prayer"}
+Creative Director Instructions: {creative_brief if creative_brief else "Warm, reverent, clear teaching ending with a short prayer."}
 Target Length: {length_guidance}
 
 Rules:
-- Each slide must have 'heading' (short uppercase banner), 'on_screen_text' (key verse or 2-3 short bullet points for the screen), and 'narration' (natural spoken prose ONLY—no stage directions, no markdown).
-- Keep on_screen_text concise and readable (under 25 words per slide).
+- 'narration' must be natural spoken prose ONLY—no stage directions, no bullet symbols, no markdown formatting.
+- 'card_subtitle' must be a concise 1-to-2 sentence summary or anchor verse (under 28 words) to display cleanly on the video card.
 
 Title: {study_title}
-Scripture: {study.get('Scripture') or study.get('scripture') or ''}
+Scripture: {study_scripture}
 Summary: {study.get('Summary') or study.get('summary') or ''}
 Detailed Notes: {study.get('Details') or study.get('details') or ''}
 
 Return ONLY valid JSON matching this schema:
 {{
   "youtube_title": "Compelling Title | Scripture Study",
-  "youtube_description": "Full description with scripture references, timestamps, and prayer...",
-  "slides": [
-    {{
-      "heading": "SLIDE HEADING",
-      "on_screen_text": "Key scripture quote or crisp takeaway points",
-      "narration": "Spoken voiceover for this specific slide..."
-    }}
-  ]
+  "youtube_description": "Full YouTube description with scripture references and prayer...",
+  "card_subtitle": "Short anchor scripture or takeaway for the screen",
+  "narration": "Complete spoken devotional script..."
 }}
 """
 
-models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+# Prioritize high-availability GA models first to avoid 503 preview spikes
+models_to_try = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.8-flash",
+]
 response = None
 
 for attempt in range(1, 7):
@@ -322,32 +301,50 @@ for attempt in range(1, 7):
     except Exception as e:
         print(f"Attempt {attempt} ({model_name}) failed: {e}")
         if any(code in str(e) for code in ("503", "UNAVAILABLE", "429", "404", "NOT_FOUND")):
-            wait_sec = min(attempt * 12, 45)
-            time.sleep(wait_sec)
+            time.sleep(min(attempt * 10, 40))
         else:
             raise
 
 if response is None:
     raise RuntimeError("Gemini API remained unavailable after 6 retry attempts.")
 
-storyboard = json.loads(response.text)
-slides_data = storyboard.get("slides", [])
-print(f"Generated {len(slides_data)}-slide storyboard.")
+script_data = json.loads(response.text)
+narration_text = script_data.get("narration", "")
+card_subtitle = script_data.get("card_subtitle", study_scripture)
 
-# --- 7. GENERATE PER-SLIDE AUDIO & RENDER MULTI-SLIDE VIDEO ---
+# --- 7. SYNTHESIZE SINGLE AUDIO TRACK & RENDER SINGLE-SLIDE VIDEO ---
+def clean_narration_for_tts(raw_text):
+    text = re.sub(r"[*_#`~<>]", "", str(raw_text or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if text else "Let us reflect on God's Word together."
+
+
+async def synthesize_full_audio(text, out_file):
+    cleaned = clean_narration_for_tts(text)
+    fallback_voice = VOICE_FALLBACKS.get(selected_voice, "en-US-ChristopherNeural")
+
+    for attempt in range(1, 5):
+        voice_to_use = selected_voice if attempt <= 2 else fallback_voice
+        try:
+            print(f"Synthesizing voiceover ({voice_to_use}), attempt {attempt}/4...")
+            comm = edge_tts.Communicate(cleaned, voice_to_use, rate="-4%")
+            await comm.save(out_file)
+            if os.path.isfile(out_file) and os.path.getsize(out_file) > 0:
+                return
+        except Exception as e:
+            print(f"TTS attempt {attempt}/4 ({voice_to_use}) failed: {e}")
+            await asyncio.sleep(attempt * 2)
+
+    raise RuntimeError("edge-tts failed after 4 attempts.")
+
+
+voice_path = "voiceover.mp3"
+asyncio.run(synthesize_full_audio(narration_text, voice_path))
+
+voice_clip = AudioFileClip(voice_path)
+total_duration = voice_clip.duration + 1.5
+
 width, height = (1080, 1920) if is_short else (1920, 1080)
-
-theme_dir = os.path.join("assets", "backgrounds", visual_theme)
-fallback_dir = os.path.join("assets", "backgrounds")
-bg_pool = []
-
-for folder in [theme_dir, fallback_dir]:
-    if os.path.isdir(folder):
-        bg_pool.extend(
-            os.path.join(folder, f)
-            for f in os.listdir(folder)
-            if f.lower().endswith((".mp4", ".mov", ".webm"))
-        )
 
 PALETTES = {
     "navy_gold": ((20, 30, 48), "#F4EAD4", "#FFFFFF"),
@@ -366,119 +363,74 @@ PALETTES = {
 }
 bg_rgb, heading_color, body_color = PALETTES.get(visual_theme, PALETTES["navy_gold"])
 
-
-def clean_narration_for_tts(raw_text):
-    """Strips markdown, brackets, or empty strings that can trigger NoAudioReceived."""
-    text = re.sub(r"[*_#`~<>]", "", str(raw_text or ""))
-    text = re.sub(r"\s+", " ", text).strip()
-    return text if text else "Let us reflect on God's Word together."
-
-
-async def synthesize_slide_audio(text, out_file):
-    cleaned = clean_narration_for_tts(text)
-    fallback_voice = VOICE_FALLBACKS.get(selected_voice, "en-US-ChristopherNeural")
-
-    for attempt in range(1, 5):
-        voice_to_use = selected_voice if attempt <= 2 else fallback_voice
-        try:
-            comm = edge_tts.Communicate(cleaned, voice_to_use, rate="-4%")
-            await comm.save(out_file)
-            if os.path.isfile(out_file) and os.path.getsize(out_file) > 0:
-                return
-        except Exception as e:
-            print(f"TTS attempt {attempt}/4 ({voice_to_use}) failed: {e}")
-            await asyncio.sleep(attempt * 2)
-
-    raise RuntimeError(f"edge-tts failed after 4 attempts for slide text: {cleaned[:60]}...")
-
-
-slide_clips = []
-
-for i, slide in enumerate(slides_data):
-    print(f"[{i+1}/{len(slides_data)}] Synthesizing audio & building slide: {slide['heading']}...")
-    slide_audio_path = f"slide_{i}.mp3"
-    asyncio.run(synthesize_slide_audio(slide["narration"], slide_audio_path))
-
-    a_clip = AudioFileClip(slide_audio_path)
-    slide_dur = a_clip.duration + 0.6
-
-    # Priority 1: Rotated Google Drive Background Image (Column P) - fast static resize
-    if local_bg_image and os.path.isfile(local_bg_image):
-        base_img = ImageClip(local_bg_image).resize((width, height)).set_duration(slide_dur)
-        dimmer = (
-            ColorClip(size=(width, height), color=(12, 18, 30))
-            .set_opacity(0.50)
-            .set_duration(slide_dur)
-        )
-        bg_layer = CompositeVideoClip(
-            [base_img.set_position("center"), dimmer], size=(width, height)
-        )
-    # Priority 2: Local themed video loop if present
-    elif bg_pool:
-        chosen_vid = bg_pool[i % len(bg_pool)]
-        raw_vid = VideoFileClip(chosen_vid).without_audio().resize((width, height))
-        loops = int(slide_dur // raw_vid.duration) + 1
-        looped = concatenate_videoclips([raw_vid] * loops).subclip(0, slide_dur)
-        dimmer = (
-            ColorClip(size=(width, height), color=(12, 18, 30))
-            .set_opacity(0.55)
-            .set_duration(slide_dur)
-        )
-        bg_layer = CompositeVideoClip([looped, dimmer])
-    # Priority 3: Solid color palette fallback
-    else:
-        bg_layer = ColorClip(size=(width, height), color=bg_rgb).set_duration(slide_dur)
-
-    heading_clip = (
-        TextClip(
-            slide["heading"].upper(),
-            fontsize=54 if not is_short else 48,
-            color=heading_color,
-            font="DejaVu-Sans-Bold",
-            method="caption",
-            size=(int(width * 0.84), None),
-            align="center",
-        )
-        .set_position(("center", int(height * 0.22)))
-        .set_duration(slide_dur)
+# Build single static background layer (Rotated Drive Image + dark readability overlay)
+if local_bg_image and os.path.isfile(local_bg_image):
+    base_img = ImageClip(local_bg_image).resize((width, height)).set_duration(total_duration)
+    dimmer = (
+        ColorClip(size=(width, height), color=(12, 18, 30))
+        .set_opacity(0.50)
+        .set_duration(total_duration)
     )
+    bg_layer = CompositeVideoClip([base_img.set_position("center"), dimmer], size=(width, height))
+else:
+    bg_layer = ColorClip(size=(width, height), color=bg_rgb).set_duration(total_duration)
 
-    body_clip = (
-        TextClip(
-            slide["on_screen_text"],
-            fontsize=42 if not is_short else 38,
-            color=body_color,
-            font="DejaVu-Sans",
-            method="caption",
-            size=(int(width * 0.80), None),
-            align="center",
-        )
-        .set_position(("center", int(height * 0.44)))
-        .set_duration(slide_dur)
+title_clip = (
+    TextClip(
+        study_title.upper(),
+        fontsize=60 if not is_short else 52,
+        color=heading_color,
+        font="DejaVu-Sans-Bold",
+        method="caption",
+        size=(int(width * 0.84), None),
+        align="center",
     )
+    .set_position(("center", int(height * 0.24)))
+    .set_duration(total_duration)
+)
 
-    composed_slide = CompositeVideoClip([bg_layer, heading_clip, body_clip]).set_audio(
-        a_clip.set_start(0.2)
+scripture_banner = (
+    TextClip(
+        study_scripture,
+        fontsize=34 if not is_short else 32,
+        color=heading_color,
+        font="DejaVu-Sans",
+        method="caption",
+        size=(int(width * 0.80), None),
+        align="center",
     )
-    if i > 0:
-        composed_slide = composed_slide.crossfadein(0.6)
+    .set_position(("center", int(height * 0.43)))
+    .set_duration(total_duration)
+)
 
-    slide_clips.append(composed_slide)
+subtitle_clip = (
+    TextClip(
+        card_subtitle,
+        fontsize=40 if not is_short else 36,
+        color=body_color,
+        font="DejaVu-Sans",
+        method="caption",
+        size=(int(width * 0.78), None),
+        align="center",
+    )
+    .set_position(("center", int(height * 0.56)))
+    .set_duration(total_duration)
+)
 
-final_video = concatenate_videoclips(slide_clips, method="compose", padding=-0.6)
+final_video = CompositeVideoClip(
+    [bg_layer, title_clip, scripture_banner, subtitle_clip], size=(width, height)
+).set_audio(voice_clip.set_start(0.5))
 
 # Mix rotated Google Drive ambient soundtrack (Column O)
 if local_music_path and os.path.isfile(local_music_path):
     print(f"Mixing background soundtrack: {local_music_path}")
     bg_music = AudioFileClip(local_music_path)
-    bg_music = audio_loop(bg_music, duration=final_video.duration).volumex(0.12)
+    bg_music = audio_loop(bg_music, duration=total_duration).volumex(0.12)
     mixed_audio = CompositeAudioClip([final_video.audio, bg_music])
     final_video = final_video.set_audio(mixed_audio)
-else:
-    print("No background soundtrack file resolved; rendering voiceover only.")
 
 output_video_path = "final_output.mp4"
-print("Encoding final MP4 video...")
+print("Encoding single-slide MP4 video...")
 final_video.write_videofile(
     output_video_path,
     fps=24,
@@ -487,14 +439,14 @@ final_video.write_videofile(
     threads=4,
     preset="ultrafast",
 )
-print("Multi-slide video rendering complete.")
+print("Single-slide video rendering complete.")
 
 # --- 8. UPLOAD TO YOUTUBE AS 'UNLISTED' FOR REVIEW ---
 category_val = str(study.get("Category") or study.get("category") or "Faith").strip()
 body = {
     "snippet": {
-        "title": storyboard["youtube_title"][:100],
-        "description": storyboard["youtube_description"],
+        "title": script_data["youtube_title"][:100],
+        "description": script_data["youtube_description"],
         "tags": [
             "Bible Study",
             "Christian Devotional",
