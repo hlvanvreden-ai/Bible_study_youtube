@@ -10,6 +10,10 @@ on:
         required: false
         default: "fetch_and_build"
 
+concurrency:
+  group: bible-study-video-pipeline
+  cancel-in-progress: false
+
 jobs:
   run_pipeline:
     runs-on: ubuntu-latest
