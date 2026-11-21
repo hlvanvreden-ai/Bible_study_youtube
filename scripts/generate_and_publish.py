@@ -282,16 +282,17 @@ Return ONLY valid JSON matching this schema:
 
 # Prioritize high-availability GA models first to avoid 503 preview spikes
 models_to_try = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
     "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3-flash",
 ]
 response = None
 
-for attempt in range(1, 7):
+for attempt in range(1, 9):
     model_name = models_to_try[(attempt - 1) % len(models_to_try)]
     try:
-        print(f"Calling Gemini ({model_name}), attempt {attempt}/6...")
+        print(f"Calling Gemini ({model_name}), attempt {attempt}/8...")
         response = client.models.generate_content(
             model=model_name,
             contents=prompt,
@@ -299,14 +300,19 @@ for attempt in range(1, 7):
         )
         break
     except Exception as e:
+        err_str = str(e)
         print(f"Attempt {attempt} ({model_name}) failed: {e}")
-        if any(code in str(e) for code in ("503", "UNAVAILABLE", "429", "404", "NOT_FOUND")):
-            time.sleep(min(attempt * 10, 40))
+        if "404" in err_str or "NOT_FOUND" in err_str:
+            # Skip immediately to next model without sleeping
+            continue
+        if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+            time.sleep(min(attempt * 8, 30))
         else:
             raise
 
 if response is None:
-    raise RuntimeError("Gemini API remained unavailable after 6 retry attempts.")
+    raise RuntimeError("All Gemini 3 models remained temporarily unavailable after 8 attempts.")
+
 
 script_data = json.loads(response.text)
 narration_text = script_data.get("narration", "")
