@@ -27,6 +27,7 @@ from moviepy.editor import (
 )
 from moviepy.audio.fx.all import audio_loop
 
+# Ensure live unbuffered progress logs in GitHub Actions
 print = functools.partial(print, flush=True)
 
 # --- 1. LOAD ENVIRONMENT SECRETS ---
@@ -247,7 +248,7 @@ VOICE_FALLBACKS = {
     "en-US-JennyNeural": "en-US-AriaNeural",
 }
 
-# --- 6. GENERATE SPOKEN DEVOTIONAL SCRIPT WITH GEMINI (WITH RETRY) ---
+# --- 6. GENERATE SPOKEN DEVOTIONAL SCRIPT WITH GEMINI (ACTIVE GEMINI 3 MODELS) ---
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 length_guidance = (
@@ -281,7 +282,6 @@ Return ONLY valid JSON matching this schema:
 }}
 """
 
-# Prioritize high-availability GA models first to avoid 503 preview spikes
 models_to_try = [
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
@@ -304,7 +304,6 @@ for attempt in range(1, 9):
         err_str = str(e)
         print(f"Attempt {attempt} ({model_name}) failed: {e}")
         if "404" in err_str or "NOT_FOUND" in err_str:
-            # Skip immediately to next model without sleeping
             continue
         if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
             time.sleep(min(attempt * 8, 30))
@@ -313,7 +312,6 @@ for attempt in range(1, 9):
 
 if response is None:
     raise RuntimeError("All Gemini 3 models remained temporarily unavailable after 8 attempts.")
-
 
 script_data = json.loads(response.text)
 narration_text = script_data.get("narration", "")
@@ -368,123 +366,4 @@ PALETTES = {
     "cedar_linen": ((54, 34, 24), "#F5EBE0", "#FFFFFF"),
     "ocean_mist": ((12, 45, 72), "#BAE6FD", "#FFFFFF"),
 }
-bg_rgb, heading_color, body_color = PALETTES.get(visual_theme, PALETTES["navy_gold"])
-
-# Build single static background layer (Rotated Drive Image + dark readability overlay)
-if local_bg_image and os.path.isfile(local_bg_image):
-    base_img = ImageClip(local_bg_image).resize((width, height)).set_duration(total_duration)
-    dimmer = (
-        ColorClip(size=(width, height), color=(12, 18, 30))
-        .set_opacity(0.50)
-        .set_duration(total_duration)
-    )
-    bg_layer = CompositeVideoClip([base_img.set_position("center"), dimmer], size=(width, height))
-else:
-    bg_layer = ColorClip(size=(width, height), color=bg_rgb).set_duration(total_duration)
-
-title_clip = (
-    TextClip(
-        study_title.upper(),
-        fontsize=60 if not is_short else 52,
-        color=heading_color,
-        font="DejaVu-Sans-Bold",
-        method="caption",
-        size=(int(width * 0.84), None),
-        align="center",
-    )
-    .set_position(("center", int(height * 0.24)))
-    .set_duration(total_duration)
-)
-
-scripture_banner = (
-    TextClip(
-        study_scripture,
-        fontsize=34 if not is_short else 32,
-        color=heading_color,
-        font="DejaVu-Sans",
-        method="caption",
-        size=(int(width * 0.80), None),
-        align="center",
-    )
-    .set_position(("center", int(height * 0.43)))
-    .set_duration(total_duration)
-)
-
-subtitle_clip = (
-    TextClip(
-        card_subtitle,
-        fontsize=40 if not is_short else 36,
-        color=body_color,
-        font="DejaVu-Sans",
-        method="caption",
-        size=(int(width * 0.78), None),
-        align="center",
-    )
-    .set_position(("center", int(height * 0.56)))
-    .set_duration(total_duration)
-)
-
-final_video = CompositeVideoClip(
-    [bg_layer, title_clip, scripture_banner, subtitle_clip], size=(width, height)
-).set_audio(voice_clip.set_start(0.5))
-
-# Mix rotated Google Drive ambient soundtrack (Column O)
-if local_music_path and os.path.isfile(local_music_path):
-    print(f"Mixing background soundtrack: {local_music_path}")
-    bg_music = AudioFileClip(local_music_path)
-    bg_music = audio_loop(bg_music, duration=total_duration).volumex(0.12)
-    mixed_audio = CompositeAudioClip([final_video.audio, bg_music])
-    final_video = final_video.set_audio(mixed_audio)
-
-output_video_path = "final_output.mp4"
-print("Encoding single-slide MP4 video...")
-final_video.write_videofile(
-    output_video_path,
-    fps=24,
-    codec="libx264",
-    audio_codec="aac",
-    threads=4,
-    preset="ultrafast",
-)
-print("Single-slide video rendering complete.")
-
-# --- 8. UPLOAD TO YOUTUBE AS 'UNLISTED' FOR REVIEW ---
-category_val = str(study.get("Category") or study.get("category") or "Faith").strip()
-body = {
-    "snippet": {
-        "title": script_data["youtube_title"][:100],
-        "description": script_data["youtube_description"],
-        "tags": [
-            "Bible Study",
-            "Christian Devotional",
-            "Scripture",
-            category_val,
-        ],
-        "categoryId": "22",
-    },
-    "status": {
-        "privacyStatus": "unlisted",
-        "selfDeclaredMadeForKids": False,
-    },
-}
-
-media = MediaFileUpload(
-    output_video_path, chunksize=-1, resumable=True, mimetype="video/mp4"
-)
-request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-
-response_upload = None
-while response_upload is None:
-    status, response_upload = request.next_chunk()
-    if status:
-        print(f"Upload progress: {int(status.progress() * 100)}%")
-
-video_id = response_upload["id"]
-youtube_url = f"https://youtu.be/{video_id}"
-print(f"Uploaded unlisted draft for review: {youtube_url}")
-
-# --- 9. UPDATE SHEET TO 'PENDING REVIEW' & NOTIFY ---
-sheet.update_cell(target_row_index, 7, "Pending Review")
-sheet.update_cell(target_row_index, 10, youtube_url)
-send_review_notification(target_row_index, study_title, youtube_url)
-print(f"Row {target_row_index} updated to 'Pending Review'.")
+bg_rgb, heading_color, body_color = PALETTES
