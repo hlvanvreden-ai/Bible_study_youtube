@@ -106,28 +106,37 @@ Return ONLY a valid JSON object matching this exact schema:
 }}
 If all studies are already in the sheet, return {{"new_studies": []}}.
 """
-
-models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+models_to_try = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash",
+]
 response = None
 
 for attempt in range(1, 7):
     model_name = models_to_try[(attempt - 1) % len(models_to_try)]
     try:
         print(f"Extracting new studies via {model_name} (attempt {attempt}/6)...")
-        response = genai_client.models.generate_content(
+        response = client.models.generate_content(
             model=model_name,
-            contents=extraction_prompt,
+            contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
         break
     except Exception as e:
+        err_str = str(e)
         print(f"Attempt {attempt} ({model_name}) failed: {e}")
-        if any(code in str(e) for code in ("503", "UNAVAILABLE", "429", "404", "NOT_FOUND")):
-            time.sleep(min(attempt * 10, 45))
+        if "404" in err_str or "NOT_FOUND" in err_str:
+            continue
+        if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+            time.sleep(min(attempt * 8, 30))
         else:
             raise
 
 if response is None:
+    raise RuntimeError("All Gemini 3 models remained unavailable during NotebookLM extraction.")
+
     raise RuntimeError("Gemini API remained unavailable while extracting NotebookLM studies.")
 
 parsed = json.loads(response.text)
