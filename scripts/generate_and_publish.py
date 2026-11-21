@@ -366,4 +366,4 @@ PALETTES = {
     "cedar_linen": ((54, 34, 24), "#F5EBE0", "#FFFFFF"),
     "ocean_mist": ((12, 45, 72), "#BAE6FD", "#FFFFFF"),
 }
-bg_rgb, heading_color, body_color = PALETTES
+bg_rgb, heading_color, body_color = PALETTES.get(visual_theme, PALETTES["navy_gold"])
