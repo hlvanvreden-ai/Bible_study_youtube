@@ -29,12 +29,18 @@ creds = ServiceAccountCredentials.from_service_account_info(
 gc = gspread.authorize(creds)
 sheet = gc.open("Bible study list").sheet1
 
+headers = [h.strip().casefold() for h in sheet.row_values(1)]
 records = sheet.get_all_records()
+
 existing_titles = {
-    str(row.get("Title", "")).strip().casefold()
+    str(row.get("title", "")).strip().casefold()
     for row in records
-    if str(row.get("Title", "")).strip()
+    if str(row.get("title", "")).strip()
 }
+
+print(f"Spreadsheet: {sheet.title}")
+print(f"Existing studies: {len(existing_titles)}")
+print(f"Spreadsheet headings: {headers}")
 
 # --- 2. FETCH SOURCES & NOTES FROM NOTEBOOKLM ---
 async def get_notebook_content():
