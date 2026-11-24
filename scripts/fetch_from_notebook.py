@@ -122,7 +122,15 @@ Existing study titles already in the spreadsheet (DO NOT include duplicates of t
 NotebookLM content:
 {notebook_content}
 
-Extract ONLY new Bible studies not already listed above. For each new study, provide:
+Extract EVERY distinct Bible study found in the NotebookLM
+content, regardless of whether it already exists in the spreadsheet.
+
+Do not perform duplicate checking. The Python program will
+handle duplicate detection after extraction.
+Return every distinct study in the new_studies array.
+Do not return an empty array if complete Bible studies
+are clearly present in the supplied content.
+
 - title: exact study title
 - category: one of [Christian Walk, Spiritual Warfare, Theology & Covenant,
   Psalms & Prayer, Identity & Rebirth, Word Studies, Living Water & Spirit]
