@@ -1,3 +1,103 @@
+import asyncio
+import functools
+import json
+import os
+import time
+import uuid
+
+import gspread
+from google import genai
+from google.genai import types
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from notebooklm import NotebookLMClient
+
+# GitHub Actions logs should appear immediately.
+print = functools.partial(print, flush=True)
+
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+NOTEBOOK_TITLE = os.environ.get("NOTEBOOK_TITLE", "Bible study").strip()
+
+# --- 1. CONNECT TO GOOGLE SHEETS ---
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+creds = ServiceAccountCredentials.from_service_account_info(
+    SERVICE_ACCOUNT_INFO, scopes=SCOPES
+)
+gc = gspread.authorize(creds)
+sheet = gc.open("Bible study list").sheet1
+
+records = sheet.get_all_records()
+existing_titles = {
+    str(row.get("Title", "")).strip().casefold()
+    for row in records
+    if str(row.get("Title", "")).strip()
+}
+
+# --- 2. FETCH SOURCES & NOTES FROM NOTEBOOKLM ---
+async def get_notebook_content():
+    async with await NotebookLMClient.from_storage() as client:
+        notebooks = await client.notebooks.list()
+        target = next(
+            (
+                nb
+                for nb in notebooks
+                if str(getattr(nb, "title", "")).strip().casefold() == NOTEBOOK_TITLE.casefold()
+            ),
+            None,
+        )
+        if not target:
+            available = [getattr(nb, "title", "") for nb in notebooks]
+            raise RuntimeError(
+                f"Notebook '{NOTEBOOK_TITLE}' not found. Available notebooks: {available}"
+            )
+
+        print(f"Found NotebookLM notebook: {target.title} ({target.id})")
+        parts = []
+
+        # Fetch sources
+        sources = await client.sources.list(target.id)
+        for src in sources:
+            src_title = getattr(src, "title", "Untitled Source")
+            try:
+                full_text = await client.sources.get_fulltext(target.id, src.id)
+                if full_text:
+                    parts.append(f"=== SOURCE: {src_title} ===\n{full_text}")
+            except Exception as exc:
+                print(f"Warning: could not fetch fulltext for source '{src_title}': {exc}")
+
+        # Fetch saved notes
+        try:
+            notes = await client.notes.list(target.id)
+            for note in notes:
+                note_title = getattr(note, "title", "Untitled Note")
+                note_content = getattr(note, "content", "") or getattr(note, "text", "")
+                if note_content:
+                    parts.append(f"=== NOTE: {note_title} ===\n{note_content}")
+        except Exception as exc:
+            print(f"Warning: could not list notes: {exc}")
+
+        return "\n\n".join(parts)
+
+
+notebook_content = asyncio.run(get_notebook_content())
+if not notebook_content.strip():
+    print("Notebook returned no readable sources or notes. Nothing to sync.")
+    raise SystemExit(0)
+
+# --- 3. EXTRACT NEW STUDIES VIA GEMINI ---
+existing_titles_list = sorted(existing_titles)
+extraction_prompt = f"""You are extracting structured Bible study entries from NotebookLM content so they can be added to a Google Sheet.
+
+Existing study titles already in the spreadsheet (DO NOT include duplicates of these):
+{json.dumps(existing_titles_list, ensure_ascii=False)}
+
+NotebookLM content:
+{notebook_content}
+
+Extract ONLY new Bible studies not already listed above. For each new study, provide:
 - title: exact study title
 - category: one of [Christian Walk, Spiritual Warfare, Theology & Covenant,
   Psalms & Prayer, Identity & Rebirth, Word Studies, Living Water & Spirit]
