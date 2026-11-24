@@ -17,6 +17,7 @@ concurrency:
 jobs:
   run_pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -25,32 +26,41 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install system and Python dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick
-          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-*/policy.xml || true
-          pip install google-genai gspread google-auth google-api-python-client edge-tts moviepy==1.0.3 Pillow notebooklm-py
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install "numpy<2" google-genai gspread google-auth google-api-python-client edge-tts "moviepy==1.0.3" Pillow notebooklm-py
 
-      - name: Configure NotebookLM Auth
+      - name: Configure NotebookLM authentication
         if: >-
           (github.event_name == 'repository_dispatch' && github.event.action == 'fetch_notebook_studies') ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_mode != 'build_only')
+        env:
+          NOTEBOOKLM_STORAGE_JSON: ${{ secrets.NOTEBOOKLM_STORAGE_JSON }}
         run: |
           mkdir -p ~/.notebooklm
-          echo '${{ secrets.NOTEBOOKLM_STORAGE_JSON }}' > ~/.notebooklm/storage_state.json
-          
-      - name: Step 1 - Fetch Missing Studies from NotebookLM
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          value = os.environ.get("NOTEBOOKLM_STORAGE_JSON", "")
+          if not value:
+              raise SystemExit("Missing GitHub secret: NOTEBOOKLM_STORAGE_JSON")
+          Path.home().joinpath(".notebooklm", "storage_state.json").write_text(value, encoding="utf-8")
+          PY
+
+      - name: Step 1 - Fetch missing studies from NotebookLM
         if: >-
           (github.event_name == 'repository_dispatch' && github.event.action == 'fetch_notebook_studies') ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_mode != 'build_only')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          NOTEBOOKLM_STORAGE_JSON: ${{ secrets.NOTEBOOKLM_STORAGE_JSON }}
           NOTEBOOK_TITLE: "Bible study"
         run: python scripts/fetch_from_notebook.py
 
-      - name: Step 2 - Render Video (Stage 1) or Schedule Approved Video (Stage 2)
+      - name: Step 2 - Render video or schedule an approved video
         if: >-
           (github.event_name == 'repository_dispatch' && github.event.action == 'build_daily_video') ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_mode != 'fetch_only')
