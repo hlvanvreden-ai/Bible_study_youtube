@@ -65,13 +65,41 @@ async def get_notebook_content():
 
         # Fetch sources
         sources = await client.sources.list(target.id)
-        for src in sources:
-            src_title = getattr(src, "title", "Untitled Source")
-            try:
-                full_text = await client.sources.get_fulltext(
-    target.id,
-    src.id,
-)
+
+for src in sources:
+    src_title = getattr(src, "title", "Untitled Source")
+
+    try:
+        full_text = await client.sources.get_fulltext(
+            target.id,
+            src.id
+        )
+
+        if full_text:
+            actual_text = (
+                getattr(full_text, "content", None)
+                or str(full_text)
+            )
+
+            if not isinstance(actual_text, str):
+                actual_text = str(actual_text)
+
+            if actual_text.strip():
+                parts.append(
+                    f"=== SOURCE: {src_title} ===\n"
+                    f"{actual_text}"
+                )
+
+                print(
+                    f"Retrieved source: {src_title} "
+                    f"({len(actual_text)} characters)"
+                )
+
+    except Exception as e:
+        print(
+            f"WARNING: Could not retrieve source "
+            f"'{src_title}': {e}"
+        )
 
 if full_text:
     actual_text = (
