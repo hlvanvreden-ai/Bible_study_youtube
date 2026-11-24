@@ -87,8 +87,17 @@ async def get_notebook_content():
 
         return "\n\n".join(parts)
 
-
 notebook_content = asyncio.run(get_notebook_content())
+
+print(f"NotebookLM content length: {len(notebook_content)} characters")
+
+if notebook_content.strip():
+    print("NotebookLM content preview:")
+    print(notebook_content[:2000])
+else:
+    print("ERROR: No readable notebook content found.")
+    raise SystemExit(1)
+
 if not notebook_content.strip():
     print("Notebook returned no readable sources or notes. Nothing to sync.")
     raise SystemExit(0)
