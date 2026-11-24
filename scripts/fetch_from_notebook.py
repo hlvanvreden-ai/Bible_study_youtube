@@ -68,11 +68,21 @@ async def get_notebook_content():
         for src in sources:
             src_title = getattr(src, "title", "Untitled Source")
             try:
-                full_text = await client.sources.get_fulltext(target.id, src.id)
-                if full_text:
-                    parts.append(f"=== SOURCE: {src_title} ===\n{full_text}")
-            except Exception as exc:
-                print(f"Warning: could not fetch fulltext for source '{src_title}': {exc}")
+                full_text = await client.sources.get_fulltext(
+    target.id,
+    src.id,
+)
+
+if full_text:
+    actual_text = (
+        getattr(full_text, "content", None)
+        or str(full_text)
+    )
+
+    if actual_text:
+        parts.append(
+            f"=== SOURCE: {src_title} ===\n{actual_text}"
+        )
 
         # Fetch saved notes
         try:
