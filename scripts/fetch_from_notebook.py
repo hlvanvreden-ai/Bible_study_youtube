@@ -234,10 +234,17 @@ def parse_json_response(response_text):
             text = text[4:].strip()
     return json.loads(text)
 
-
 response = generate_with_fallback(extraction_prompt, "Study extraction")
+
+print("========== GEMINI EXTRACTION RESPONSE ==========")
+print(response.text)
+print("================================================")
+
 parsed = parse_json_response(response.text)
 new_studies = parsed.get("new_studies", [])
+
+print(f"Studies extracted by Gemini: {len(new_studies)}")
+
 
 if not isinstance(new_studies, list):
     raise RuntimeError("Gemini response did not contain a 'new_studies' list.")
@@ -256,7 +263,6 @@ def sheets_call_with_retry(fn, *args, **kwargs):
                 continue
             raise
     return fn(*args, **kwargs)
-
 
 rows_to_append = []
 for item in new_studies:
