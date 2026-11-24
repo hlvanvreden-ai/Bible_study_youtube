@@ -2,11 +2,11 @@ name: Daily Bible Study Video Production
 
 on:
   repository_dispatch:
-    types: [fetch_notebook_studies, build_daily_video]
+    types: [fetch_notebook_studies, prepare_study_metadata, build_daily_video]
   workflow_dispatch:
     inputs:
       action_mode:
-        description: "Mode: fetch_and_build | fetch_only | build_only"
+        description: "Mode: fetch_and_build | fetch_only | build_only | prepare_only"
         required: false
         default: "fetch_and_build"
 
@@ -35,7 +35,7 @@ jobs:
 
       - name: Configure NotebookLM authentication
         if: >-
-          (github.event_name == 'repository_dispatch' && github.event.action == 'fetch_notebook_studies') ||
+          (github.event_name == 'repository_dispatch' && github.event.action == 'fetch_notebook_studies') || 
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_mode != 'build_only')
         env:
           NOTEBOOKLM_STORAGE_JSON: ${{ secrets.NOTEBOOKLM_STORAGE_JSON }}
@@ -52,7 +52,7 @@ jobs:
 
       - name: Step 1 - Fetch missing studies from NotebookLM
         if: >-
-          (github.event_name == 'repository_dispatch' && github.event.action == 'fetch_notebook_studies') ||
+          (github.event_name == 'repository_dispatch' && github.event.action == 'fetch_notebook_studies') || 
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_mode != 'build_only')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -60,9 +60,18 @@ jobs:
           NOTEBOOK_TITLE: "Bible study"
         run: python scripts/fetch_from_notebook.py
 
+      - name: Step 1b - Prepare render metadata (Creative Brief & Slides)
+        if: >-
+          (github.event_name == 'repository_dispatch' && github.event.action == 'prepare_study_metadata') || 
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action_mode != 'build_only')
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python scripts/prepare_study_metadata.py
+
       - name: Step 2 - Render video or schedule an approved video
         if: >-
-          (github.event_name == 'repository_dispatch' && github.event.action == 'build_daily_video') ||
+          (github.event_name == 'repository_dispatch' && github.event.action == 'build_daily_video') || 
           (github.event_name == 'workflow_dispatch' && github.event.inputs.action_mode != 'fetch_only')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
