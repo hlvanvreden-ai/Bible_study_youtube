@@ -1,157 +1,108 @@
-import os
-import re
-import json
-import uuid
-import time
-import asyncio
-import gspread
-from google import genai
-from google.genai import types
-from google.oauth2.service_account import Credentials as ServiceAccountCredentials
-from notebooklm import NotebookLMClient
+- title: exact study title
+- category: one of [Christian Walk, Spiritual Warfare, Theology & Covenant,
+  Psalms & Prayer, Identity & Rebirth, Word Studies, Living Water & Spirit]
+- scripture: comma-separated Scripture references
+- summary: 1-2 sentence summary
+- details: structured HTML teaching notes using only h3, p, ul and li tags
 
-# --- 1. LOAD SECRETS ---
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-NOTEBOOK_TITLE = os.environ.get("NOTEBOOK_TITLE", "Bible studies").strip()
-
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
-# --- 2. CONNECT TO GOOGLE SHEETS ---
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-sheets_creds = ServiceAccountCredentials.from_service_account_info(
-    SERVICE_ACCOUNT_INFO, scopes=SCOPES
-)
-gc = gspread.authorize(sheets_creds)
-sheet = gc.open("Bible study list").sheet1
-existing_records = sheet.get_all_records()
-
-existing_titles = {
-    str(r.get("title", "")).strip().lower()
-    for r in existing_records
-    if str(r.get("title", "")).strip()
-}
-print(f"Loaded {len(existing_titles)} existing studies from 'Bible study list'.")
-
-
-async def fetch_notebook_sources():
-    """Connects to NotebookLM and retrieves only the most recent Bible studies without exceeding RPC size caps."""
-    async with await NotebookLMClient.from_storage() as client:
-        notebooks = await client.notebooks.list()
-        target_nb = next(
-            (
-                nb
-                for nb in notebooks
-                if "bible study" in nb.title.lower() and "youtube" not in nb.title.lower()
-            ),
-            None,
-        )
-        if not target_nb:
-            raise RuntimeError(
-                f"Notebook '{NOTEBOOK_TITLE}' not found. Available: {[nb.title for nb in notebooks]}"
-            )
-
-        print(f"Connected to notebook: '{target_nb.title}' (ID: {target_nb.id})")
-
-        # Skip client.sources.list() to avoid the 268 MB RPC payload limit on large notebooks;
-        # query only the 3 most recent studies via chat.ask() instead.
-        ask_resp = await client.chat.ask(
-            target_nb.id,
-            "Provide ONLY the 3 most recent Bible studies created in this notebook "
-            "(including yesterday's study 'He First Loved Us...'). "
-            "For each of those 3 studies, provide: exact Title, Category, primary Scripture references, "
-            "a concise Summary, and the complete structured HTML teaching notes. "
-            "Do NOT include older studies beyond the 3 most recent.",
-        )
-        sources = []
-        return sources, ask_resp.answer
-
-
-sources, notebook_digest = asyncio.run(fetch_notebook_sources())
-
-# --- 3. EXTRACT & STRUCTURE MISSING STUDIES WITH GEMINI ---
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
-existing_list_str = "\n".join(f"- {t}" for t in sorted(existing_titles)) or "None"
-
-extraction_prompt = f"""
-You are a theological data archivist syncing Bible studies from NotebookLM into a structured Google Sheet.
-
-Below are the study titles ALREADY present in the Google Sheet (DO NOT include these):
-{existing_list_str}
-
-Below is the content retrieved from the '{NOTEBOOK_TITLE}' NotebookLM notebook:
-{notebook_digest}
-
-Task:
-Identify every Bible study in the notebook content whose title is NOT already in the existing list above.
-For each NEW study, extract and format:
-- title: Exact study title
-- category: One of [Christian Walk, Spiritual Warfare, Theology & Covenant, Psalms & Prayer, Identity & Rebirth, Word Studies, Living Water & Spirit]
-- scripture: Comma-separated scripture references (e.g. "Psalm 103:20, Hebrews 1:14")
-- summary: 1-2 sentence summary of the study
-- details: Clean, structured HTML teaching notes using <h3>, <p>, <ul>, <li> tags
-
-Return ONLY a valid JSON object matching this exact schema:
+Return ONLY valid JSON in this format:
 {{
   "new_studies": [
     {{
       "title": "Study Title",
       "category": "Category Name",
       "scripture": "Book Chapter:Verse",
-      "summary": "Short summary...",
-      "details": "<h3>Section</h3><p>Teaching content...</p>"
+      "summary": "Short summary",
+      "details": "<h3>Section</h3><p>Teaching content</p>"
     }}
   ]
 }}
-If all studies are already in the sheet, return {{"new_studies": []}}.
+If no new studies are present, return {{"new_studies": []}}.
 """
-models_to_try = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash",
-]
-response = None
 
-for attempt in range(1, 7):
-    model_name = models_to_try[(attempt - 1) % len(models_to_try)]
-    try:
-        print(f"Extracting new studies via {model_name} (attempt {attempt}/6)...")
-        response = client.models.generate_content(
-            model=model_name,
-            contents=extraction_prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-        break
-    except Exception as e:
-        err_str = str(e)
-        print(f"Attempt {attempt} ({model_name}) failed: {e}")
-        if "404" in err_str or "NOT_FOUND" in err_str:
-            continue
-        if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
-            time.sleep(min(attempt * 8, 30))
-        else:
+MODEL_NAMES = [
+    name.strip()
+    for name in os.environ.get(
+        "GEMINI_MODEL_FALLBACKS",
+        "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.5-flash,gemini-3-flash",
+    ).split(",")
+    if name.strip()
+]
+
+
+def generate_with_fallback(prompt, stage_name):
+    """Try configured Gemini models; back off on temporary 429/503 errors."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    last_error = None
+
+    for attempt in range(1, 9):
+        model_name = MODEL_NAMES[(attempt - 1) % len(MODEL_NAMES)]
+        try:
+            print(f"{stage_name}: calling {model_name}, attempt {attempt}/8...")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            if not getattr(response, "text", None):
+                raise RuntimeError(f"{model_name} returned an empty response.")
+            return response
+        except Exception as exc:
+            last_error = exc
+            message = str(exc)
+            print(f"{stage_name}: {model_name} failed: {message}")
+
+            if "404" in message or "NOT_FOUND" in message:
+                continue
+
+            if any(code in message for code in (
+                "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
+                "500", "INTERNAL", "502", "BAD_GATEWAY",
+            )):
+                delay = min(5 * (2 ** (attempt - 1)), 60)
+                print(f"Temporary Gemini error; retrying after {delay} seconds.")
+                time.sleep(delay)
+                continue
+
             raise
 
-if response is None:
-    raise RuntimeError("All Gemini 3 models remained unavailable during NotebookLM extraction.")
+    raise RuntimeError(
+        f"{stage_name}: all 8 Gemini attempts failed. Last error: {last_error}"
+    )
 
-    raise RuntimeError("Gemini API remained unavailable while extracting NotebookLM studies.")
 
-parsed = json.loads(response.text)
+def parse_json_response(response_text):
+    """Parse JSON, tolerating a surrounding Markdown code fence."""
+    text = str(response_text or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    return json.loads(text)
+
+
+response = generate_with_fallback(extraction_prompt, "Study extraction")
+parsed = parse_json_response(response.text)
 new_studies = parsed.get("new_studies", [])
+
+if not isinstance(new_studies, list):
+    raise RuntimeError("Gemini response did not contain a 'new_studies' list.")
 
 added_count = 0
 for item in new_studies:
+    if not isinstance(item, dict):
+        continue
+
     title = str(item.get("title", "")).strip()
-    if not title or title.lower() in existing_titles:
+    title_key = title.casefold()
+    if not title or title_key in existing_titles:
         continue
 
     study_id = str(uuid.uuid4())
-    # Columns A-I: id, title, category, scripture, summary, details, Video Status (blank), Scheduled Date (blank), Video Format
+    # Existing sheet layout: A-I = id, title, category, scripture, summary,
+    # details, Video Status, Scheduled Date, Video Format.
     row_values = [
         study_id,
         title,
@@ -159,13 +110,13 @@ for item in new_studies:
         str(item.get("scripture", "")).strip(),
         str(item.get("summary", "")).strip(),
         str(item.get("details", "")).strip(),
-        "",            # Col G: Left blank so Apps Script applies rotating template & marks 'Ready'
-        "",            # Col H: Left blank so Apps Script assigns SAST timestamp
-        "Devotional",  # Col I: Default format
+        "",
+        "",
+        "Devotional",
     ]
     sheet.append_row(row_values, value_input_option="USER_ENTERED")
-    existing_titles.add(title.lower())
+    existing_titles.add(title_key)
     added_count += 1
-    print(f"Added new study to sheet: {title} ({study_id})")
+    print(f"Added new study: {title} ({study_id})")
 
-print(f"Sync complete. Added {added_count} new study(ies) to 'Bible study list'.")
+print(f"Sync complete. Added {added_count} new study/studies.")
