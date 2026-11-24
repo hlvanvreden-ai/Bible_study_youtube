@@ -29,3 +29,61 @@ The renderer currently creates a single-slide video card with voiceover and
 optional background music. It does not generate scene-by-scene footage or a
 custom thumbnail. Verify the first generated video and review the sheet column
 names/status values before enabling unattended daily publishing.
+
+Full Bible Study-to-YouTube Automation Pipeline
+From creating the Bible study in Gemini Notebook to publishing the finished video publicly on YouTube.
+1. Create the Bible study in Gemini Notebook
+   
+   You prepare the Bible study, including its title, category, scripture references, summary and detailed study notes.
+2. Retrieve the completed study
+   
+   The automation connects to NotebookLM / Gemini Notebook and retrieves the latest Bible study content.
+3. Transfer the study into Google Sheets
+   
+   The automation adds a new row to your Google Sheet, populating:
+   - ID
+   - Title
+   - Category
+   - Scripture
+   - Summary
+   - Details
+   It automatically sets Video Status to Ready.
+4. Prepare the video instructions in Google Sheets
+   
+   You can specify or adjust:
+   - Video Format
+   - Creative Brief
+   - Slide Breakdown
+   - Visual Theme
+   - Voice Style
+   - Music Track
+   - Background Image
+5. Generate the video script using Gemini AI
+   
+   The automation sends the Bible study and creative instructions to Gemini. Gemini prepares the narration and video content.
+6. Generate the voiceover
+   
+   Text-to-speech converts the script into spoken narration using the selected voice style.
+7. Create and render the video
+   
+   The automation combines the study content, slides, visual theme, background images, narration and music into the finished video.
+8. Upload the video to YouTube privately
+   
+   The rendered video is uploaded as Unlisted, so it is not yet publicly available. The YouTube URL is written back to Google Sheets.
+9. Send the approval request by email
+   
+   An email is sent to the reviewer with the video link and a request to review and approve it.
+10. Review and approve the video
+    
+    The reviewer watches the video and decides whether it is suitable.
+    - If changes are needed, the video is sent back for correction and re-rendering.
+    - If accepted, Video Status is changed to Approved.
+11. Schedule the public release
+    
+    The automation reads the Scheduled Date from Google Sheets and schedules the approved video for publication.
+12. Publish the video publicly on YouTube
+    
+    At the scheduled date and time, the video visibility changes to Public. The Bible study video is now available to everyone.
+13. Update Google Sheets
+    
+    The final YouTube URL and publication status are recorded in the spreadsheet, providing a record of the completed video.
