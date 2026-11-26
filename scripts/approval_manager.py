@@ -9,7 +9,6 @@ from email.message import EmailMessage
 import gspread
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 
-# Ensure logs flush immediately in CI/CD environments
 print = functools.partial(print, flush=True)
 
 # --- 1. CONFIGURATION & SECRETS ---
@@ -20,6 +19,7 @@ SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
 
 SPREADSHEET_ID = "1laiol-0gmUJS7yHennQXa6w8bWjfbqzLqRc0lWReOL0"
+TITLE_COL = 2          # Column B ("Title")
 VIDEO_STATUS_COL = 7   # Column G ("Video Status")
 YOUTUBE_URL_COL = 10   # Column J ("YouTube URL")
 
@@ -60,17 +60,10 @@ def connect_to_sheet():
     def get_header(col_idx):
         return header_row[col_idx - 1].strip() if len(header_row) >= col_idx else ""
 
-    col_g_header = get_header(VIDEO_STATUS_COL)
-    if col_g_header.casefold() != "video status":
-        raise RuntimeError(
-            f"Expected Column G (col {VIDEO_STATUS_COL}) to be 'Video Status', found '{col_g_header}'."
-        )
-
-    col_j_header = get_header(YOUTUBE_URL_COL)
-    if col_j_header.casefold() != "youtube url":
-        raise RuntimeError(
-            f"Expected Column J (col {YOUTUBE_URL_COL}) to be 'YouTube URL', found '{col_j_header}'."
-        )
+    if get_header(VIDEO_STATUS_COL).casefold() != "video status":
+        raise RuntimeError(f"Expected Column G to be 'Video Status', found '{get_header(VIDEO_STATUS_COL)}'.")
+    if get_header(YOUTUBE_URL_COL).casefold() != "youtube url":
+        raise RuntimeError(f"Expected Column J to be 'YouTube URL', found '{get_header(YOUTUBE_URL_COL)}'.")
 
     return sheet
 
@@ -100,7 +93,7 @@ def send_review_notification(row_idx, study_title, youtube_url):
     message["From"] = SMTP_USER
     message["To"] = NOTIFY_EMAIL
     message.set_content(
-        f"Your Bible study video '{study_title}' (row {row_idx}) is prepared and ready for review.\n\n"
+        f"Your Bible study video '{study_title}' (row {row_idx}) is uploaded as Unlisted and awaiting review.\n\n"
         f"Approve or review in the HTML portal:\n{review_link}\n\n"
         f"Unlisted YouTube video:\n{youtube_url}\n"
     )
@@ -116,20 +109,20 @@ def send_review_notification(row_idx, study_title, youtube_url):
 
 
 def notify_prepared_videos(sheet):
-    """Scan rows where Column G is 'Prepared', read YouTube URL from Column J, email the review link, and set Column G to 'Pending Review'."""
+    """Scan Column G for 'Review', read YouTube URL from Column J, email the review link, and set Column G to 'Pending Review'."""
     all_rows = sheets_call_with_retry(sheet.get_all_values)
     notified_count = 0
 
     for row_idx, row_values in enumerate(all_rows[1:], start=2):
         status = cell_value(row_values, VIDEO_STATUS_COL).casefold()
-        if status != "prepared":
+        if status != "review":
             continue
 
-        title = cell_value(row_values, 2) or "Untitled Study"  # Column B ("Title")
-        youtube_url = cell_value(row_values, YOUTUBE_URL_COL)  # Column J ("YouTube URL")
+        title = cell_value(row_values, TITLE_COL) or "Untitled Study"
+        youtube_url = cell_value(row_values, YOUTUBE_URL_COL)
 
         if not youtube_url:
-            print(f"Row {row_idx} ('{title}') is marked Prepared in G{row_idx} but J{row_idx} (YouTube URL) is empty; skipping.")
+            print(f"Row {row_idx} ('{title}') is marked 'Review' in G{row_idx} but J{row_idx} (YouTube URL) is empty; skipping.")
             continue
 
         sent = send_review_notification(row_idx, title, youtube_url)
@@ -157,13 +150,13 @@ def mark_row_approved(sheet, row_idx):
 # --- 4. CLI ENTRYPOINT ---
 def main():
     parser = argparse.ArgumentParser(
-        description="Send approval links for prepared videos (Column J) and mark Column G ('Video Status') as Approved."
+        description="Send approval links for videos in 'Review' (Column J) and mark Column G ('Video Status') as Approved."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser(
         "notify",
-        help="Scan Column G for 'Prepared', read YouTube URL from Column J, email approval link, and set G to 'Pending Review'.",
+        help="Scan Column G for 'Review', read YouTube URL from Column J, email approval link, and set G to 'Pending Review'.",
     )
 
     approve_parser = subparsers.add_parser(
