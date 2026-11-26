@@ -16,6 +16,28 @@ function safeNotify(message) {
 }
 
 /**
+ * Custom Spreadsheet Menu — includes every stage of the pipeline in order.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("🎬 Video Pipeline")
+    .addItem("🚀 Run Full Pipeline in One Go", "runFullPipelineOneGo")
+    .addSeparator()
+    .addItem("1. Fetch New Studies from NotebookLM", "manualFetchFromNotebook")
+    .addItem("2. Prepare Render Metadata (Creative Brief & Slides)", "manualPrepareMetadata")
+    .addItem("3. Prepare Next Study & Render Unlisted Video", "manualRunCompletePipeline")
+    .addItem("4. Send Approval Emails (Review → Pending Review)", "manualSendApprovalEmails")
+    .addItem("5. Schedule Approved Videos on YouTube", "manualScheduleApprovedVideos")
+    .addSeparator()
+    .addItem("Fill Missing Ready Dates & Templates (SAST)", "fillMissingReadyDates")
+    .addItem("Reset Template Rotation to Row 2", "resetTemplateCounter")
+    .addSeparator()
+    .addItem("⚙️ Enable Automated Trigger (Every 6h)", "setupAutomaticTriggers")
+    .addItem("🛑 Disable Automated Triggers", "removeAutomaticTriggers")
+    .addToUi();
+}
+
+/**
  * Runs the entire end-to-end pipeline in sequence:
  * 1. Fetches new studies from NotebookLM via GitHub Actions
  * 2. Prepares render metadata (Creative Brief, Slide Breakdown, Themes, Media)
@@ -67,7 +89,7 @@ function runFullPipelineOneGo() {
     }
   }
 
-  // Step 2b: Trigger Python preparation metadata script workflow if configured
+  // Step 2b: Trigger Python preparation metadata script workflow
   dispatchGitHubEvent("prepare_study_metadata", true);
 
   // Step 3: Trigger Stage 1 Video Render & Review Email
@@ -76,29 +98,12 @@ function runFullPipelineOneGo() {
   const mediaInfo = lastMedia
     ? `\nBackground: ${lastMedia.bgFileName || "Preset"}\nSoundtrack: ${lastMedia.musicFileName || "Preset"}`
     : "";
+
   safeNotify(
     `🚀 Full Pipeline Triggered!\n` +
       `Rows prepared: ${preparedCount}\n` +
       `GitHub Actions is running metadata preparation and rendering your video shortly.${mediaInfo}`
   );
-}
-
-function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu("🎬 Video Pipeline")
-    .addItem("🚀 Run Full Pipeline in One Go", "runFullPipelineOneGo")
-    .addSeparator()
-    .addItem("1. Fetch New Studies from NotebookLM", "manualFetchFromNotebook")
-    .addItem("0. Prepare Render Metadata (Creative Brief & Slides)", "manualPrepareMetadata")
-    .addItem("2. Prepare Next Study & Trigger Render", "manualRunCompletePipeline")
-    .addItem("3. Trigger Video Render Only (Stage 1/2)", "triggerGitHubAction")
-    .addSeparator()
-    .addItem("Fill Missing Ready Dates & Templates (SAST)", "fillMissingReadyDates")
-    .addItem("Reset Template Rotation to Row 2", "resetTemplateCounter")
-    .addSeparator()
-    .addItem("⚙️ Enable Automated Trigger (Every 6h)", "setupAutomaticTriggers")
-    .addItem("🛑 Disable Automated Triggers", "removeAutomaticTriggers")
-    .addToUi();
 }
 
 /**
@@ -112,7 +117,6 @@ function getNextRotatedDriveMedia() {
 
   const pickNextFromFolder = (folderId, counterKey, mimePrefix, validExts) => {
     if (!folderId) return { id: "", name: "", count: 0 };
-
     const folder = DriveApp.getFolderById(folderId);
     const iter = folder.getFiles();
     const items = [];
@@ -123,17 +127,14 @@ function getNextRotatedDriveMedia() {
       const name = file.getName();
       const lower = name.toLowerCase();
       const mime = file.getMimeType() || "";
-
       const matchesMime = mime.indexOf(mimePrefix) === 0;
       const matchesExt = validExts.some((ext) => lower.endsWith(ext));
-
       if (matchesMime || matchesExt) {
         items.push({ id: file.getId(), name: name });
       }
     }
 
     if (items.length === 0) return { id: "", name: "", count: 0 };
-
     items.sort((a, b) => a.name.localeCompare(b.name));
 
     const lastIdx = parseInt(props.getProperty(counterKey) || "-1", 10);
@@ -162,7 +163,7 @@ function getNextRotatedDriveMedia() {
     bgCount: nextBg.count,
     musicFileId: nextMusic.id,
     musicFileName: nextMusic.name,
-    musicCount: nextMusic.count
+    musicCount: nextMusic.count,
   };
 }
 
@@ -207,17 +208,23 @@ function applyTemplateAndDriveMedia(sheet, targetRow) {
   return media;
 }
 
+/**
+ * Menu Step 1: Fetch new studies from NotebookLM.
+ */
 function manualFetchFromNotebook() {
   dispatchGitHubEvent("fetch_notebook_studies", false);
 }
 
 /**
- * Menu Item: Triggers the `prepare_study_metadata.py` GitHub Action workflow.
+ * Menu Step 2: Populate Creative Brief, Slide Breakdown, Visual Theme, Voice, Music & Background.
  */
 function manualPrepareMetadata() {
   dispatchGitHubEvent("prepare_study_metadata", false);
 }
 
+/**
+ * Menu Step 3: Prepare the next Ready/Not Started row and render/upload it as Unlisted.
+ */
 function manualRunCompletePipeline() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
   const data = sheet.getDataRange().getValues();
@@ -240,12 +247,45 @@ function manualRunCompletePipeline() {
       const mediaSummary = media
         ? `\nBackground: ${media.bgFileName || "Preset"}\nSoundtrack: ${media.musicFileName || "Preset"}`
         : "";
-      safeNotify(`Row ${rowNum} (${title}) prepared & metadata/render workflow triggered!${mediaSummary}`);
+      safeNotify(
+        `Row ${rowNum} (${title}) prepared & metadata/render workflow triggered!${mediaSummary}`
+      );
       return;
     }
   }
 
   safeNotify("No 'Not Started' or 'Ready' studies found to process.");
+}
+
+/**
+ * Menu Step 4: Trigger approval_manager.py (`notify`) to email links for any rows in 'Review'
+ * and advance them to 'Pending Review'.
+ */
+function manualSendApprovalEmails() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
+  const data = sheet.getDataRange().getValues();
+  let reviewCount = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const status = String(data[i][6] || "").trim().toLowerCase();
+    if (status === "review") {
+      reviewCount++;
+    }
+  }
+
+  if (reviewCount === 0) {
+    safeNotify("No rows are currently marked 'Review' in Column G.");
+    return;
+  }
+
+  dispatchGitHubEvent("send_approval_notifications", false);
+}
+
+/**
+ * Menu Step 5: Trigger Stage 2 in generate_and_publish.py to schedule 'Approved' videos on YouTube.
+ */
+function manualScheduleApprovedVideos() {
+  dispatchGitHubEvent("build_daily_video", false);
 }
 
 function triggerGitHubAction(silent = false) {
@@ -265,9 +305,9 @@ function dispatchGitHubEvent(eventType, silent = false) {
     contentType: "application/json",
     headers: {
       Authorization: `Bearer ${GITHUB_PAT}`,
-      Accept: "application/vnd.github.v3+json"
+      Accept: "application/vnd.github.v3+json",
     },
-    payload: JSON.stringify({ event_type: eventType })
+    payload: JSON.stringify({ event_type: eventType }),
   };
 
   try {
@@ -339,11 +379,7 @@ function setupAutomaticTriggers() {
     }
   }
 
-  ScriptApp.newTrigger("runFullPipelineOneGo")
-    .timeBased()
-    .everyHours(6)
-    .create();
-
+  ScriptApp.newTrigger("runFullPipelineOneGo").timeBased().everyHours(6).create();
   Logger.log("Automated pipeline trigger successfully created for runFullPipelineOneGo.");
 }
 
@@ -366,7 +402,6 @@ function onEdit(e) {
   const numRows = e.range.getNumRows();
   const startCol = e.range.getColumn();
   const endCol = startCol + e.range.getNumColumns() - 1;
-
   if (startRow < 2 || startCol > 2 || endCol < 1) return;
 
   for (let r = startRow; r < startRow + numRows; r++) {
@@ -405,7 +440,7 @@ function doGet(e) {
         scripture: String(data[i][3] || ""),
         scheduledDate: scheduledDate,
         videoId: videoId,
-        ytUrl: ytUrl
+        ytUrl: ytUrl,
       });
     }
   }
