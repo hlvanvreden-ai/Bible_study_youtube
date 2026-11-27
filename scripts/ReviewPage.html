@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      margin: 0;
+      padding: 24px 16px;
+    }
+    .container { max-width: 1100px; margin: 0 auto; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 14px;
+    }
+    .header h1 { color: #f4ead4; font-size: 24px; margin: 0; }
+    .badge {
+      background: #1e293b;
+      color: #38bdf8;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 24px;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      padding: 22px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+      display: flex;
+      flex-direction: column;
+      transition: opacity 0.3s ease;
+    }
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .row-pill {
+      background: #0f172a;
+      color: #f4ead4;
+      font-size: 12px;
+      font-weight: bold;
+      padding: 4px 10px;
+      border-radius: 6px;
+    }
+    .latest-tag {
+      background: #0284c7;
+      color: #fff;
+      font-size: 11px;
+      font-weight: bold;
+      padding: 3px 8px;
+      border-radius: 6px;
+      text-transform: uppercase;
+    }
+    h2 { color: #f4ead4; font-size: 19px; margin: 6px 0 10px; }
+    .meta { color: #94a3b8; font-size: 13px; line-height: 1.5; margin-bottom: 14px; }
+    .video-wrap {
+      position: relative;
+      padding-bottom: 56.25%;
+      height: 0;
+      overflow: hidden;
+      border-radius: 8px;
+      background: #000;
+      margin-bottom: 14px;
+    }
+    .video-wrap iframe {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border: 0;
+    }
+    .notes {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 13px;
+      box-sizing: border-box;
+      margin-bottom: 14px;
+      resize: vertical;
+    }
+    .actions { display: flex; gap: 10px; margin-top: auto; }
+    button {
+      flex: 1;
+      padding: 12px;
+      font-size: 14px;
+      font-weight: bold;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .btn-approve { background: #16a34a; color: white; }
+    .btn-approve:hover { background: #15803d; }
+    .btn-reject { background: #dc2626; color: white; }
+    .btn-reject:hover { background: #b91c1c; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status-msg {
+      margin-top: 12px;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      color: #38bdf8;
+      min-height: 18px;
+    }
+    .empty-state {
+      background: #1e293b;
+      border-radius: 14px;
+      padding: 48px 24px;
+      text-align: center;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🎬 Bible Study Video Approval Queue</h1>
+      <span class="badge"><?= pendingItems.length ?> Pending</span>
+    </div>
+
+    <? if (pendingItems.length === 0) { ?>
+      <div class="empty-state">
+        <h2>All Caught Up!</h2>
+        <p>There are currently no videos marked as <strong>Pending Review</strong> in your Google Sheet.</p>
+      </div>
+    <? } else { ?>
+      <div class="grid">
+        <? for (var i = 0; i < pendingItems.length; i++) { var item = pendingItems[i]; ?>
+          <div class="card" id="card-<?= item.row ?>">
+            <div class="card-top">
+              <span class="row-pill">Row <?= item.row ?> • <?= item.category ?></span>
+              <? if (i === 0) { ?><span class="latest-tag">Latest</span><? } ?>
+            </div>
+            <h2><?= item.title ?></h2>
+            <div class="meta">
+              <strong>Scripture:</strong> <?= item.scripture ?><br>
+              <strong>Publish (SAST):</strong> <?= item.scheduledDate ?>
+            </div>
+
+            <div class="video-wrap">
+              <iframe src="https://www.youtube.com/embed/<?= item.videoId ?>" allowfullscreen></iframe>
+            </div>
+
+            <textarea id="feedback-<?= item.row ?>" class="notes" rows="2" placeholder="Optional revision notes if rejecting..."></textarea>
+
+            <div class="actions">
+              <button class="btn-approve" id="btn-app-<?= item.row ?>" onclick="submitDecision(<?= item.row ?>, 'approve')">✅ Approve</button>
+              <button class="btn-reject" id="btn-rej-<?= item.row ?>" onclick="submitDecision(<?= item.row ?>, 'disapprove')">❌ Reject</button>
+            </div>
+            <div class="status-msg" id="status-<?= item.row ?>"></div>
+          </div>
+        <? } ?>
+      </div>
+    <? } ?>
+  </div>
+
+  <script>
+    function submitDecision(row, decision) {
+      document.getElementById('btn-app-' + row).disabled = true;
+      document.getElementById('btn-rej-' + row).disabled = true;
+      document.getElementById('status-' + row).innerText = 'Saving decision...';
+
+      const feedback = document.getElementById('feedback-' + row).value;
+      google.script.run
+        .withSuccessHandler(function(res) {
+          document.getElementById('status-' + row).innerText = res;
+          document.getElementById('card-' + row).style.opacity = '0.65';
+        })
+        .withFailureHandler(function(err) {
+          document.getElementById('status-' + row).innerText = 'Error: ' + err.message;
+          document.getElementById('btn-app-' + row).disabled = false;
+          document.getElementById('btn-rej-' + row).disabled = false;
+        })
+        .processReviewDecision(row, decision, feedback);
+    }
+  </script>
+</body>
+</html>
