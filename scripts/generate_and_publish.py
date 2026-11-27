@@ -748,10 +748,10 @@ sheets_call_with_retry(
     sheet.batch_update,
     [
         {"range": gspread.utils.rowcol_to_a1(target_row, YOUTUBE_URL_COL), "values": [[youtube_url]]},
-        {"range": gspread.utils.rowcol_to_a1(target_row, STATUS_COL), "values": [["Review"]]},
+        {"range": gspread.utils.rowcol_to_a1(target_row, STATUS_COL), "values": [["Pending Review"]]},
     ],
 )
-print(f"Uploaded video as Unlisted: {youtube_url}")
+print(f"Uploaded video as Unlisted (Pending Review): {youtube_url}")
 
 try:
     send_review_notification(target_row, study_title, youtube_url)
