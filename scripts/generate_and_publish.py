@@ -473,7 +473,293 @@ youtube_description = str(
 ).strip()
 card_subtitle = str(script_data.get("card_subtitle") or study_scripture).strip()
 
-
 # --- 6. SYNTHESIZE VOICEOVER ---
 VOICE_MAP = {
-    "luke": "en-ZA-Luke
+    "luke": "en-ZA-LukeNeural",
+    "leah": "en-ZA-LeahNeural",
+    "christopher": "en-US-ChristopherNeural",
+    "andrew": "en-US-AndrewNeural",
+    "aria": "en-US-AriaNeural",
+    "jenny": "en-US-JennyNeural",
+}
+selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
+VOICE_FALLBACKS = {
+    "en-ZA-LukeNeural": "en-US-ChristopherNeural",
+    "en-ZA-LeahNeural": "en-US-AriaNeural",
+    "en-US-ChristopherNeural": "en-US-AndrewNeural",
+    "en-US-AndrewNeural": "en-US-ChristopherNeural",
+    "en-US-AriaNeural": "en-US-JennyNeural",
+    "en-US-JennyNeural": "en-US-AriaNeural",
+}
+
+
+def clean_narration(raw_text):
+    value = re.sub(r"[*_#`~<>]", "", str(raw_text or ""))
+    return re.sub(r"\s+", " ", value).strip()
+
+
+async def synthesize_voiceover(text, output_path):
+    cleaned = clean_narration(text)
+    if not cleaned:
+        raise RuntimeError("Narration was empty after text cleanup.")
+    fallback_voice = VOICE_FALLBACKS.get(selected_voice, "en-US-ChristopherNeural")
+
+    for attempt in range(1, 5):
+        voice = selected_voice if attempt <= 2 else fallback_voice
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            print(f"Synthesizing voiceover ({voice}), attempt {attempt}/4...")
+            communicator = edge_tts.Communicate(cleaned, voice, rate="-4%")
+            await communicator.save(output_path)
+            if os.path.isfile(output_path) and os.path.getsize(output_path) > 1000:
+                return
+            raise RuntimeError("TTS returned an empty or unusually small audio file.")
+        except Exception as exc:
+            print(f"TTS attempt {attempt}/4 failed: {exc}")
+            if attempt < 4:
+                await asyncio.sleep(attempt * 3)
+    raise RuntimeError("Edge TTS failed after four attempts.")
+
+
+VOICE_PATH = "voiceover.mp3"
+asyncio.run(synthesize_voiceover(narration, VOICE_PATH))
+
+
+# --- 7. BUILD A SINGLE-SLIDE VIDEO CARD ---
+PALETTES = {
+    "navy_gold": ((20, 30, 48), "#F4EAD4", "#FFFFFF"),
+    "forest_cream": ((24, 42, 34), "#E9DFC8", "#F8F9FA"),
+    "burgundy_warm": ((48, 22, 28), "#F5E6CC", "#FFFFFF"),
+    "midnight_amber": ((15, 23, 42), "#FBBF24", "#F8FAFC"),
+    "royal_purple": ((36, 20, 54), "#F3E8FF", "#FFFFFF"),
+    "olive_parchment": ((42, 48, 32), "#FAF3E0", "#FFFFFF"),
+    "slate_silver": ((30, 41, 59), "#E2E8F0", "#FFFFFF"),
+    "crimson_gold": ((69, 10, 10), "#FDE68A", "#FFFFFF"),
+    "teal_sand": ((17, 48, 52), "#FEF3C7", "#FFFFFF"),
+    "charcoal_copper": ((28, 25, 23), "#FED7AA", "#FAFAF9"),
+    "indigo_pearl": ((30, 27, 75), "#E0E7FF", "#FFFFFF"),
+    "cedar_linen": ((54, 34, 24), "#F5EBE0", "#FFFFFF"),
+    "ocean_mist": ((12, 45, 72), "#BAE6FD", "#FFFFFF"),
+}
+bg_rgb, heading_color, body_color = PALETTES.get(
+    visual_theme, PALETTES["navy_gold"]
+)
+
+
+def load_font(size, bold=False):
+    candidates = (
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ] if bold else [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return ImageFont.truetype(candidate, size=size)
+    return ImageFont.load_default()
+
+
+def wrap_to_width(draw, text, font, max_width):
+    words = str(text or "").split()
+    lines, current = [], ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if current and draw.textlength(trial, font=font) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = trial
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def make_video_card(output_path, background_path=""):
+    width, height = (1080, 1920) if is_short else (1920, 1080)
+    base_color = tuple(int(channel) for channel in bg_rgb)
+
+    if background_path:
+        try:
+            with Image.open(background_path) as source:
+                canvas = ImageOps.fit(source.convert("RGB"), (width, height))
+            overlay = Image.new("RGBA", (width, height), (0, 0, 0, 125))
+            canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
+        except Exception as exc:
+            print(f"WARNING: Background image could not be used: {exc}")
+            canvas = Image.new("RGB", (width, height), base_color)
+    else:
+        canvas = Image.new("RGB", (width, height), base_color)
+
+    draw = ImageDraw.Draw(canvas)
+    margin = int(width * 0.10)
+    max_text_width = width - 2 * margin
+
+    # Subtle frame and accent line.
+    accent = heading_color
+    draw.rounded_rectangle(
+        (int(width * 0.045), int(height * 0.045),
+         int(width * 0.955), int(height * 0.955)),
+        radius=max(18, int(width * 0.018)),
+        outline=accent,
+        width=max(2, int(width * 0.0025)),
+    )
+    draw.rounded_rectangle(
+        (margin, int(height * 0.27), margin + int(width * 0.12),
+         int(height * 0.277)),
+        radius=4,
+        fill=accent,
+    )
+
+    title_font = load_font(int(width * (0.047 if is_short else 0.050)), bold=True)
+    subtitle_font = load_font(int(width * (0.035 if is_short else 0.032)))
+    scripture_font = load_font(int(width * 0.022))
+    footer_font = load_font(int(width * 0.018))
+
+    title_lines = wrap_to_width(draw, study_title, title_font, max_text_width)
+    subtitle_lines = wrap_to_width(draw, card_subtitle, subtitle_font, max_text_width)
+    scripture_text = study_scripture or "A Bible Study"
+
+    title_line_height = int(title_font.size * 1.25)
+    subtitle_line_height = int(subtitle_font.size * 1.45)
+    title_block_height = title_line_height * len(title_lines)
+    subtitle_block_height = subtitle_line_height * len(subtitle_lines)
+    combined_height = title_block_height + int(height * 0.045) + subtitle_block_height
+    y = int((height - combined_height) / 2) - int(height * 0.015)
+
+    for line in title_lines:
+        draw.text((margin, y), line, font=title_font, fill=heading_color)
+        y += title_line_height
+
+    y += int(height * 0.045)
+    for line in subtitle_lines:
+        draw.text((margin, y), line, font=subtitle_font, fill=body_color)
+        y += subtitle_line_height
+
+    scripture_y = int(height * 0.79)
+    for line in wrap_to_width(draw, scripture_text, scripture_font, max_text_width)[:2]:
+        draw.text((margin, scripture_y), line, font=scripture_font, fill=heading_color)
+        scripture_y += int(scripture_font.size * 1.4)
+
+    footer = "BIBLE STUDY  •  DEVOTIONAL"
+    draw.text(
+        (margin, int(height * 0.90)),
+        footer,
+        font=footer_font,
+        fill=body_color,
+    )
+    canvas.save(output_path, format="PNG", optimize=True)
+
+
+CARD_PATH = "video_card.png"
+make_video_card(CARD_PATH, local_background)
+
+# --- 8. ASSEMBLE VIDEO AND AUDIO ---
+VIDEO_PATH = "bible_study_video.mp4"
+voice_clip = None
+music_clip = None
+final_audio = None
+video_clip = None
+
+try:
+    voice_clip = AudioFileClip(VOICE_PATH)
+    duration = max(voice_clip.duration + 1.5, 5.0)
+    audio_layers = [voice_clip]
+
+    if local_music and os.path.isfile(local_music):
+        try:
+            music_clip = AudioFileClip(local_music)
+            music_loop = audio_loop(music_clip, duration=duration).volumex(0.12)
+            audio_layers.append(music_loop)
+        except Exception as exc:
+            print(f"WARNING: Background music could not be added: {exc}")
+
+    final_audio = CompositeAudioClip(audio_layers).set_duration(duration)
+    video_clip = (
+        ImageClip(np.array(Image.open(CARD_PATH).convert("RGB")))
+        .set_duration(duration)
+        .set_audio(final_audio)
+    )
+
+    print(f"Rendering {VIDEO_PATH} ({duration:.1f} seconds)...")
+    video_clip.write_videofile(
+        VIDEO_PATH,
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        preset="medium",
+        threads=2,
+        temp_audiofile="video_temp_audio.m4a",
+        remove_temp=True,
+        logger="bar",
+    )
+finally:
+    if video_clip is not None:
+        video_clip.close()
+    if final_audio is not None:
+        final_audio.close()
+    if music_clip is not None:
+        music_clip.close()
+    if voice_clip is not None:
+        voice_clip.close()
+
+if not os.path.isfile(VIDEO_PATH) or os.path.getsize(VIDEO_PATH) < 10_000:
+    raise RuntimeError("Video render did not produce a valid MP4 file.")
+
+
+# --- 9. UPLOAD TO YOUTUBE AS UNLISTED FOR REVIEW ---
+video_body = {
+    "snippet": {
+        "title": youtube_title,
+        "description": youtube_description,
+        "categoryId": "22",
+        "defaultLanguage": "en",
+        "tags": ["Bible Study", "Christian Devotional", "Scripture", "Prayer"],
+    },
+    "status": {
+        "privacyStatus": "unlisted",
+        "selfDeclaredMadeForKids": False,
+    },
+}
+media = MediaFileUpload(
+    VIDEO_PATH,
+    mimetype="video/mp4",
+    resumable=True,
+    chunksize=8 * 1024 * 1024,
+)
+upload_request = youtube.videos().insert(
+    part="snippet,status",
+    body=video_body,
+    media_body=media,
+)
+upload_response = None
+while upload_response is None:
+    upload_status, upload_response = upload_request.next_chunk(num_retries=5)
+    if upload_status is not None:
+        print(f"YouTube upload progress: {int(upload_status.progress() * 100)}%")
+
+video_id = upload_response.get("id") if upload_response else None
+if not video_id:
+    raise RuntimeError(f"YouTube upload returned no video ID: {upload_response}")
+
+youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+sheets_call_with_retry(
+    sheet.batch_update,
+    [
+        {"range": gspread.utils.rowcol_to_a1(target_row, YOUTUBE_URL_COL), "values": [[youtube_url]]},
+        {"range": gspread.utils.rowcol_to_a1(target_row, STATUS_COL), "values": [["Review"]]},
+    ],
+)
+print(f"Uploaded video as Unlisted: {youtube_url}")
+
+try:
+    send_review_notification(target_row, study_title, youtube_url)
+except Exception as exc:
+    # The video and sheet update have succeeded; don't mark the whole run failed
+    # solely because the optional email notification could not be delivered.
+    print(f"WARNING: Video uploaded, but review email failed: {exc}")
+
+print(f"Completed successfully for spreadsheet row {target_row}.")
