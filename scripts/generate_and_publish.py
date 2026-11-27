@@ -249,13 +249,12 @@ def download_drive_asset(file_ref, out_prefix):
         print(f"WARNING: Could not download Drive asset '{value}': {exc}")
         return ""
 
-
-# --- 2b. NOTIFICATION-ONLY DISPATCH FOR ROWS IN REVIEW ---
+# --- 2b. NOTIFICATION-ONLY DISPATCH FOR ROWS IN PENDING REVIEW ---
 if DISPATCH_ACTION == "send_approval_notifications":
     sent_count = 0
     for row_number, row in enumerate(records, start=2):
         status = str(value_from_row(row, "Video Status")).strip().casefold()
-        if status != "review":
+        if status not in ("pending review", "review"):
             continue
 
         study_title = str(value_from_row(row, "Title", default="Untitled Study")).strip()
@@ -270,12 +269,11 @@ if DISPATCH_ACTION == "send_approval_notifications":
         sent_count += 1
 
     if sent_count == 0:
-        print("No rows marked Review. Nothing to notify.")
+        print("No rows marked Pending Review. Nothing to notify.")
     else:
         print(f"Successfully sent {sent_count} approval notification(s).")
     sys.exit(0)
-
-
+    
 # --- 3. STAGE 2: SCHEDULE AN APPROVED VIDEO BEFORE RENDERING A NEW ONE ---
 for row_number, row in enumerate(records, start=2):
     status = str(value_from_row(row, "Video Status")).strip().casefold()
