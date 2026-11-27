@@ -2,7 +2,7 @@ name: Daily Bible Study Video Production
 
 on:
   repository_dispatch:
-    types: [fetch_notebook_studies, prepare_study_metadata, build_daily_video]
+    types: [fetch_notebook_studies, prepare_study_metadata, build_daily_video, send_approval_notifications]
   workflow_dispatch:
     inputs:
       action_mode:
