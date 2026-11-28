@@ -17,6 +17,7 @@ print = functools.partial(print, flush=True)
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SERVICE_ACCOUNT_INFO = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
 NOTEBOOK_TITLE = os.environ.get("NOTEBOOK_TITLE", "Bible study").strip()
+BATCH_SIZE = int(os.environ.get("FETCH_BATCH_SIZE", "3"))
 
 
 def sheets_call_with_retry(fn, *args, **kwargs):
@@ -64,7 +65,8 @@ print(f"Spreadsheet headings: {headers}")
 
 
 # --- 2. FETCH SOURCES & NOTES FROM NOTEBOOKLM ---
-async def get_notebook_content():
+async def get_notebook_items():
+    """Return a list of (label, content_block) tuples for sources and saved notes."""
     async with await NotebookLMClient.from_storage() as client:
         notebooks = await client.notebooks.list()
         target = next(
@@ -82,12 +84,12 @@ async def get_notebook_content():
             )
 
         print(f"Found NotebookLM notebook: {target.title} ({target.id})")
-        parts = []
+        items = []
 
         # Fetch sources
         sources = await client.sources.list(target.id)
         for src in sources:
-            src_title = getattr(src, "title", "Untitled Source")
+            src_title = str(getattr(src, "title", "Untitled Source")).strip()
             try:
                 full_text = await client.sources.get_fulltext(target.id, src.id)
                 if full_text:
@@ -96,7 +98,7 @@ async def get_notebook_content():
                         actual_text = str(actual_text)
 
                     if actual_text.strip():
-                        parts.append(f"=== SOURCE: {src_title} ===\n{actual_text}")
+                        items.append((src_title, f"=== SOURCE: {src_title} ===\n{actual_text}"))
                         print(
                             f"Retrieved source: {src_title} "
                             f"({len(actual_text)} characters)"
@@ -108,10 +110,10 @@ async def get_notebook_content():
         try:
             notes = await client.notes.list(target.id)
             for note in notes:
-                note_title = getattr(note, "title", "Untitled Note")
+                note_title = str(getattr(note, "title", "Untitled Note")).strip()
                 note_content = getattr(note, "content", "") or getattr(note, "text", "")
                 if note_content and str(note_content).strip():
-                    parts.append(f"=== NOTE: {note_title} ===\n{note_content}")
+                    items.append((note_title, f"=== NOTE: {note_title} ===\n{note_content}"))
                     print(
                         f"Retrieved note: {note_title} "
                         f"({len(str(note_content))} characters)"
@@ -119,54 +121,28 @@ async def get_notebook_content():
         except Exception as exc:
             print(f"Warning: could not list notes: {exc}")
 
-        return "\n\n".join(parts)
+        return items
 
 
-notebook_content = asyncio.run(get_notebook_content())
+notebook_items = asyncio.run(get_notebook_items())
+total_chars = sum(len(block) for _, block in notebook_items)
+print(f"Total NotebookLM items: {len(notebook_items)} ({total_chars} characters)")
 
-print(f"NotebookLM content length: {len(notebook_content)} characters")
-
-if notebook_content.strip():
-    print("NotebookLM content preview:")
-    print(notebook_content[:2000])
-else:
+if not notebook_items:
     print("ERROR: No readable notebook content found.")
     raise SystemExit(1)
 
+# Skip single-study sources/notes whose exact title already exists in the sheet,
+# while still inspecting multi-study compilations or new items.
+candidate_items = [
+    (title, block)
+    for title, block in notebook_items
+    if title.casefold() not in existing_titles or len(block) > 6000
+]
+print(f"Candidate items to inspect for missing studies: {len(candidate_items)}")
 
-# --- 3. EXTRACT NEW STUDIES VIA GEMINI ---
-extraction_prompt = f"""You are extracting structured Bible study entries from NotebookLM content so they can be added to a Google Sheet.
 
-NotebookLM content:
-{notebook_content}
-
-Extract EVERY distinct Bible study found in the NotebookLM content, regardless of whether it already exists in a spreadsheet.
-Do not perform duplicate checking. The Python program will handle duplicate detection after extraction.
-Return every distinct study in the new_studies array.
-Do not return an empty array if complete Bible studies are clearly present in the supplied content.
-
-Fields for each study:
-- title: exact study title
-- category: one of [Christian Walk, Spiritual Warfare, Theology & Covenant, Psalms & Prayer, Identity & Rebirth, Word Studies, Living Water & Spirit]
-- scripture: comma-separated Scripture references
-- summary: 1-2 sentence summary
-- details: structured HTML teaching notes using only h3, p, ul and li tags
-
-Return ONLY valid JSON in this format:
-{{
-  "new_studies": [
-    {{
-      "title": "Study Title",
-      "category": "Category Name",
-      "scripture": "Book Chapter:Verse",
-      "summary": "Short summary",
-      "details": "<h3>Section</h3><p>Teaching content</p>"
-    }}
-  ]
-}}
-If no studies are present, return {{"new_studies": []}}.
-"""
-
+# --- 3. EXTRACT NEW STUDIES VIA GEMINI (BATCHED) ---
 DEFAULT_MODELS = [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
@@ -231,7 +207,10 @@ def generate_with_fallback(prompt, stage_name):
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=16384,
+                ),
             )
             if not getattr(response, "text", None):
                 raise RuntimeError(f"{model_name} returned an empty response.")
@@ -270,8 +249,8 @@ def generate_with_fallback(prompt, stage_name):
     )
 
 
-def parse_json_response(response_text):
-    """Parse JSON, tolerating a surrounding Markdown code fence."""
+def parse_json_response(response_text, stage_name=""):
+    """Parse JSON, tolerating Markdown fences and salvaging complete items if truncated."""
     text = str(response_text or "").strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1]
@@ -279,25 +258,89 @@ def parse_json_response(response_text):
             text = text[:-3].strip()
         if text.lower().startswith("json"):
             text = text[4:].strip()
-    return json.loads(text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as err:
+        print(
+            f"WARNING ({stage_name}): JSONDecodeError ({err}). "
+            f"Length={len(text)}, tail={text[-250:]!r}"
+        )
+        # Salvage any complete study objects before a truncated trailing object
+        last_obj_end = text.rfind("},")
+        if last_obj_end != -1:
+            repaired = text[: last_obj_end + 1] + "\n  ]\n}"
+            try:
+                salvaged = json.loads(repaired)
+                count = len(salvaged.get("new_studies", []))
+                print(f"Salvaged {count} complete study object(s) from truncated JSON.")
+                return salvaged
+            except json.JSONDecodeError:
+                pass
+        raise
 
 
-response = generate_with_fallback(extraction_prompt, "Study extraction")
+def build_extraction_prompt(batch_content, known_titles):
+    existing_json = json.dumps(sorted(known_titles), ensure_ascii=False)
+    return f"""You are extracting NEW structured Bible study entries from NotebookLM content so they can be added to a Google Sheet.
 
-print("========== GEMINI EXTRACTION RESPONSE ==========")
-print(response.text)
-print("================================================")
+Already-existing study titles in the Google Sheet (DO NOT extract or return any study matching these titles):
+{existing_json}
 
-parsed = parse_json_response(response.text)
-new_studies = parsed.get("new_studies", [])
+NotebookLM content batch:
+{batch_content}
 
-print(f"Studies extracted by Gemini: {len(new_studies)}")
+Extract ONLY distinct Bible studies found in the NotebookLM content batch whose title is NOT in the existing list above.
+Do not return an empty array if new complete Bible studies are clearly present in the supplied batch.
 
-if not isinstance(new_studies, list):
-    raise RuntimeError("Gemini response did not contain a 'new_studies' list.")
+Fields for each NEW study:
+- title: exact study title
+- category: one of [Christian Walk, Spiritual Warfare, Theology & Covenant, Psalms & Prayer, Identity & Rebirth, Word Studies, Living Water & Spirit]
+- scripture: comma-separated Scripture references
+- summary: 1-2 sentence summary
+- details: concise, structured HTML teaching notes (max 1,200 characters) using only h3, p, ul and li tags
+
+Return ONLY valid JSON in this format:
+{{
+  "new_studies": [
+    {{
+      "title": "Study Title",
+      "category": "Category Name",
+      "scripture": "Book Chapter:Verse",
+      "summary": "Short summary",
+      "details": "<h3>Section</h3><p>Teaching content</p>"
+    }}
+  ]
+}}
+If no new studies are present in this batch, return {{"new_studies": []}}.
+"""
+
+
+all_extracted_studies = []
+
+for start in range(0, len(candidate_items), BATCH_SIZE):
+    batch = candidate_items[start : start + BATCH_SIZE]
+    batch_num = (start // BATCH_SIZE) + 1
+    total_batches = (len(candidate_items) + BATCH_SIZE - 1) // BATCH_SIZE
+    stage_label = f"Study extraction (batch {batch_num}/{total_batches})"
+
+    batch_content = "\n\n".join(block for _, block in batch)
+    prompt = build_extraction_prompt(batch_content, existing_titles)
+    response = generate_with_fallback(prompt, stage_label)
+
+    parsed = parse_json_response(response.text, stage_label)
+    batch_studies = parsed.get("new_studies", [])
+
+    if not isinstance(batch_studies, list):
+        raise RuntimeError(f"{stage_label}: Gemini response did not contain a 'new_studies' list.")
+
+    print(f"{stage_label}: extracted {len(batch_studies)} candidate study/studies.")
+    all_extracted_studies.extend(batch_studies)
+
+print(f"Total new candidate studies extracted across all batches: {len(all_extracted_studies)}")
 
 rows_to_append = []
-for item in new_studies:
+for item in all_extracted_studies:
     if not isinstance(item, dict):
         continue
 
