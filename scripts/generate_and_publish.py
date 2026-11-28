@@ -482,10 +482,12 @@ You are a reverent, Christ-centred Bible teacher creating a {video_format} devot
 Write a cohesive, warm spoken script based only on the Bible study supplied below.
 
 Creative direction: {creative_brief or "Warm, reverent, clear teaching ending with a short prayer."}
+Voice & pacing direction: {voice_choice or "Warm, reflective, measured pacing, authoritative yet deeply comforting and pastoral baritone."}
 Target length: {length_guidance}
 
 Requirements:
 - narration must be natural spoken prose only: no stage directions, bullets or Markdown.
+- Structure narration into distinct, well-paced paragraphs separated by a blank line (\\n\\n) between each major teaching point, Scripture reflection, and the closing prayer so the narrator pauses naturally between points.
 - card_subtitle must be a concise 1-2 sentence takeaway or anchor verse, under 28 words.
 - Preserve the study's theological meaning and Scripture references. Do not invent quotations
   or claim that a paraphrase is a direct Bible quotation.
@@ -501,7 +503,7 @@ Return only valid JSON:
   "youtube_title": "Compelling title | Scripture Study",
   "youtube_description": "YouTube description with Scripture references and prayer",
   "card_subtitle": "Short anchor Scripture or takeaway",
-  "narration": "Complete spoken devotional script"
+  "narration": "Paragraph 1 opening hook.\\n\\nParagraph 2 Scripture insight.\\n\\nParagraph 3 core truth.\\n\\nParagraph 4 practical application.\\n\\nParagraph 5 closing prayer."
 }}
 """
 
@@ -601,38 +603,99 @@ VOICE_MAP = {
     "leah": "en-ZA-LeahNeural",
     "christopher": "en-US-ChristopherNeural",
     "andrew": "en-US-AndrewNeural",
+    "brian": "en-US-BrianNeural",
+    "steffan": "en-US-SteffanNeural",
+    "ryan": "en-GB-RyanNeural",
     "aria": "en-US-AriaNeural",
     "jenny": "en-US-JennyNeural",
 }
-selected_voice = VOICE_MAP.get(voice_choice, "en-ZA-LukeNeural")
 VOICE_FALLBACKS = {
-    "en-ZA-LukeNeural": "en-US-ChristopherNeural",
+    "en-ZA-LukeNeural": "en-US-AndrewNeural",
     "en-ZA-LeahNeural": "en-US-AriaNeural",
     "en-US-ChristopherNeural": "en-US-AndrewNeural",
-    "en-US-AndrewNeural": "en-US-ChristopherNeural",
+    "en-US-AndrewNeural": "en-US-BrianNeural",
+    "en-US-BrianNeural": "en-US-AndrewNeural",
+    "en-US-SteffanNeural": "en-US-ChristopherNeural",
+    "en-GB-RyanNeural": "en-US-AndrewNeural",
     "en-US-AriaNeural": "en-US-JennyNeural",
     "en-US-JennyNeural": "en-US-AriaNeural",
 }
 
 
+def resolve_voice_and_prosody(voice_style_text):
+    """Map an exact voice key or descriptive style phrase to a neural voice, slower rate, and baritone pitch."""
+    raw = str(voice_style_text or "").strip().lower()
+    if raw in VOICE_MAP:
+        chosen = VOICE_MAP[raw]
+        pitch = "-3Hz" if chosen in ("en-US-ChristopherNeural", "en-US-AndrewNeural", "en-ZA-LukeNeural") else "-1Hz"
+        return chosen, "-8%", pitch
+
+    # Parse descriptive style prompts from Column N
+    if any(word in raw for word in ("female", "woman", "leah", "aria", "jenny")):
+        chosen = "en-ZA-LeahNeural"
+        pitch = "-1Hz"
+    elif any(word in raw for word in ("british", "uk", "ryan", "scholarly")):
+        chosen = "en-GB-RyanNeural"
+        pitch = "-2Hz"
+    elif any(word in raw for word in ("baritone", "authoritative", "deep", "resonant")):
+        # AndrewNeural delivers a warm, deeply comforting, authoritative pastoral baritone without harshness
+        chosen = "en-US-AndrewNeural" if any(w in raw for w in ("pastoral", "comforting", "warm")) else "en-US-ChristopherNeural"
+        pitch = "-3Hz"
+    elif any(word in raw for word in ("pastoral", "comforting", "gentle", "warm")):
+        chosen = "en-US-AndrewNeural"
+        pitch = "-2Hz"
+    else:
+        chosen = "en-ZA-LukeNeural"
+        pitch = "-3Hz"
+
+    rate = "-9%" if any(w in raw for w in ("measured", "slow", "reflective", "meditative")) else "-8%"
+    return chosen, rate, pitch
+
+
+selected_voice, voice_rate, voice_pitch = resolve_voice_and_prosody(voice_choice)
+print(f"Resolved Voice Style -> voice='{selected_voice}', rate='{voice_rate}', pitch='{voice_pitch}'")
+
+
 def clean_narration(raw_text):
+    """Clean markdown while preserving paragraph boundaries as natural spoken pauses between points."""
     value = re.sub(r"[*_#`~<>]", "", str(raw_text or ""))
-    return re.sub(r"\s+", " ", value).strip()
+    # Split on double newlines (or single newlines if Gemini used line breaks per point)
+    raw_blocks = re.split(r"\n\s*\n", value)
+    if len(raw_blocks) == 1:
+        raw_blocks = value.splitlines()
+
+    paragraphs = []
+    for block in raw_blocks:
+        cleaned_block = re.sub(r"\s+", " ", block).strip()
+        if cleaned_block:
+            if cleaned_block[-1] not in ".!?":
+                cleaned_block += "."
+            paragraphs.append(cleaned_block)
+
+    # Trailing ellipsis + paragraph break produces a natural ~0.9s contemplative pause in Edge TTS
+    return " ...\n\n".join(paragraphs)
 
 
 async def synthesize_voiceover(text, output_path):
     cleaned = clean_narration(text)
     if not cleaned:
         raise RuntimeError("Narration was empty after text cleanup.")
-    fallback_voice = VOICE_FALLBACKS.get(selected_voice, "en-US-ChristopherNeural")
+    fallback_voice = VOICE_FALLBACKS.get(selected_voice, "en-US-AndrewNeural")
 
     for attempt in range(1, 5):
         voice = selected_voice if attempt <= 2 else fallback_voice
         try:
             if os.path.exists(output_path):
                 os.remove(output_path)
-            print(f"Synthesizing voiceover ({voice}), attempt {attempt}/4...")
-            communicator = edge_tts.Communicate(cleaned, voice, rate="-4%")
+            print(
+                f"Synthesizing voiceover ({voice}, rate={voice_rate}, pitch={voice_pitch}), attempt {attempt}/4..."
+            )
+            communicator = edge_tts.Communicate(
+                cleaned,
+                voice,
+                rate=voice_rate,
+                pitch=voice_pitch,
+            )
             await communicator.save(output_path)
             if os.path.isfile(output_path) and os.path.getsize(output_path) > 1000:
                 return
