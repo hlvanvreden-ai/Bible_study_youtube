@@ -296,7 +296,7 @@ for row_number, row in enumerate(records, start=2):
         body={
             "id": video_id,
             "status": {
-                "privacyStatus": "private",
+                "privacyStatus": "unlisted",
                 "publishAt": scheduled_at,
                 "selfDeclaredMadeForKids": False,
             },
