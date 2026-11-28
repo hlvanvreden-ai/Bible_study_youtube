@@ -75,13 +75,25 @@
       overflow: hidden;
       border-radius: 8px;
       background: #000;
-      margin-bottom: 14px;
+      margin-bottom: 8px;
     }
     .video-wrap iframe {
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
       border: 0;
+    }
+    .yt-fallback {
+      margin-bottom: 14px;
+      text-align: right;
+    }
+    .yt-fallback a {
+      color: #38bdf8;
+      font-size: 13px;
+      text-decoration: none;
+    }
+    .yt-fallback a:hover {
+      text-decoration: underline;
     }
     .notes {
       width: 100%;
@@ -154,7 +166,18 @@
             </div>
 
             <div class="video-wrap">
-              <iframe src="https://www.youtube.com/embed/<?= item.videoId ?>" allowfullscreen></iframe>
+              <iframe
+                src="https://www.youtube-nocookie.com/embed/<?= item.videoId ?>?rel=0"
+                title="<?= item.title ?>"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowfullscreen>
+              </iframe>
+            </div>
+            <div class="yt-fallback">
+              <a href="<?= item.ytUrl || ('https://www.youtube.com/watch?v=' + item.videoId) ?>" target="_blank" rel="noopener noreferrer">
+                ↗ Open video directly in YouTube
+              </a>
             </div>
 
             <textarea id="feedback-<?= item.row ?>" class="notes" rows="2" placeholder="Optional revision notes if rejecting..."></textarea>
