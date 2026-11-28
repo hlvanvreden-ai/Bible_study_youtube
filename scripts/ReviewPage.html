@@ -68,32 +68,45 @@
     }
     h2 { color: #f4ead4; font-size: 19px; margin: 6px 0 10px; }
     .meta { color: #94a3b8; font-size: 13px; line-height: 1.5; margin-bottom: 14px; }
-    .video-wrap {
+    .thumb-link {
+      display: block;
       position: relative;
-      padding-bottom: 56.25%;
-      height: 0;
-      overflow: hidden;
       border-radius: 8px;
+      overflow: hidden;
       background: #000;
-      margin-bottom: 8px;
-    }
-    .video-wrap iframe {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      border: 0;
-    }
-    .yt-fallback {
       margin-bottom: 14px;
-      text-align: right;
-    }
-    .yt-fallback a {
-      color: #38bdf8;
-      font-size: 13px;
+      border: 1px solid #334155;
       text-decoration: none;
     }
-    .yt-fallback a:hover {
-      text-decoration: underline;
+    .thumb-link img {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.25s ease;
+    }
+    .thumb-link:hover img {
+      transform: scale(1.02);
+    }
+    .thumb-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.38);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .play-pill {
+      background: #dc2626;
+      color: #ffffff;
+      padding: 11px 20px;
+      border-radius: 999px;
+      font-weight: bold;
+      font-size: 14px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    }
+    .thumb-link:hover .play-pill {
+      background: #b91c1c;
     }
     .notes {
       width: 100%;
@@ -165,53 +178,21 @@
               <strong>Publish (SAST):</strong> <?= item.scheduledDate ?>
             </div>
 
-            <div class="video-wrap">
-              <iframe
-                src="https://www.youtube-nocookie.com/embed/<?= item.videoId ?>?rel=0"
-                title="<?= item.title ?>"
-                referrerpolicy="strict-origin-when-cross-origin"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowfullscreen>
-              </iframe>
-            </div>
-            <div class="yt-fallback">
-              <a href="<?= item.ytUrl || ('https://www.youtube.com/watch?v=' + item.videoId) ?>" target="_blank" rel="noopener noreferrer">
-                ↗ Open video directly in YouTube
-              </a>
-            </div>
+            <a
+              class="thumb-link"
+              href="<?= item.ytUrl || ('https://www.youtube.com/watch?v=' + item.videoId) ?>"
+              target="_blank"
+              rel="noopener noreferrer">
+              <img
+                src="https://img.youtube.com/vi/<?= item.videoId ?>/hqdefault.jpg"
+                alt="<?= item.title ?>">
+              <div class="thumb-overlay">
+                <span class="play-pill">▶ Watch Preview on YouTube</span>
+              </div>
+            </a>
 
             <textarea id="feedback-<?= item.row ?>" class="notes" rows="2" placeholder="Optional revision notes if rejecting..."></textarea>
 
             <div class="actions">
               <button class="btn-approve" id="btn-app-<?= item.row ?>" onclick="submitDecision(<?= item.row ?>, 'approve')">✅ Approve</button>
-              <button class="btn-reject" id="btn-rej-<?= item.row ?>" onclick="submitDecision(<?= item.row ?>, 'disapprove')">❌ Reject</button>
-            </div>
-            <div class="status-msg" id="status-<?= item.row ?>"></div>
-          </div>
-        <? } ?>
-      </div>
-    <? } ?>
-  </div>
-
-  <script>
-    function submitDecision(row, decision) {
-      document.getElementById('btn-app-' + row).disabled = true;
-      document.getElementById('btn-rej-' + row).disabled = true;
-      document.getElementById('status-' + row).innerText = 'Saving decision...';
-
-      const feedback = document.getElementById('feedback-' + row).value;
-      google.script.run
-        .withSuccessHandler(function(res) {
-          document.getElementById('status-' + row).innerText = res;
-          document.getElementById('card-' + row).style.opacity = '0.65';
-        })
-        .withFailureHandler(function(err) {
-          document.getElementById('status-' + row).innerText = 'Error: ' + err.message;
-          document.getElementById('btn-app-' + row).disabled = false;
-          document.getElementById('btn-rej-' + row).disabled = false;
-        })
-        .processReviewDecision(row, decision, feedback);
-    }
-  </script>
-</body>
-</html>
+              <button class="btn-reject" id="btn-rej-<?= item.row ?>" onclick="submitDecision(<?= item.
