@@ -40,6 +40,9 @@ SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
 DISPATCH_ACTION = os.environ.get("DISPATCH_ACTION", "").strip()
 
+BG_FOLDER_NAME = os.environ.get("BG_FOLDER_NAME", "Bible Study Backgrounds").strip()
+MUSIC_FOLDER_NAME = os.environ.get("MUSIC_FOLDER_NAME", "Bible Study Soundtracks").strip()
+
 SAST_TZ = timezone(timedelta(hours=2))
 MODEL_NAMES = [
     name.strip()
@@ -200,15 +203,59 @@ def value_from_row(row, *possible_names, default=""):
     return default
 
 
-def download_drive_asset(file_ref, out_prefix):
-    """Download a Drive ID, share URL or exact filename; return local path or empty string."""
+def get_fallback_drive_asset(folder_name, row_index):
+    """Find a Drive folder by name and deterministically pick a file by row_index."""
+    if not folder_name:
+        return None, None
+    try:
+        escaped_folder = folder_name.replace("\\", "\\\\").replace("'", "\\'")
+        q_folder = (
+            f"name = '{escaped_folder}' and "
+            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        )
+        folders = (
+            drive_service.files()
+            .list(q=q_folder, fields="files(id,name)", pageSize=1)
+            .execute()
+            .get("files", [])
+        )
+        if not folders:
+            print(f"WARNING: Fallback Drive folder '{folder_name}' not found.")
+            return None, None
+
+        folder_id = folders[0]["id"]
+        q_files = (
+            f"'{folder_id}' in parents and "
+            "mimeType != 'application/vnd.google-apps.folder' and trashed = false"
+        )
+        files = (
+            drive_service.files()
+            .list(q=q_files, orderBy="name", fields="files(id,name)", pageSize=100)
+            .execute()
+            .get("files", [])
+        )
+        if not files:
+            print(f"WARNING: Fallback Drive folder '{folder_name}' is empty.")
+            return None, None
+
+        chosen = files[row_index % len(files)]
+        print(f"Selected rotating Drive asset from '{folder_name}': {chosen['name']} ({chosen['id']}).")
+        return chosen["id"], chosen["name"]
+    except Exception as exc:
+        print(f"WARNING: Could not list fallback Drive folder '{folder_name}': {exc}")
+        return None, None
+
+
+def download_drive_asset(file_ref, out_prefix, fallback_folder_name="", row_index=0):
+    """Download a Drive ID, share URL, exact filename, or rotate from fallback_folder_name."""
     value = str(file_ref or "").strip()
-    if not value or value.casefold() == "none":
+    if value.casefold() == "none":
         return ""
-    if os.path.isfile(value):
+    if value and os.path.isfile(value):
         return value
 
     file_id = None
+    original_name = "asset.bin"
     match = re.search(r"/d/([A-Za-z0-9_-]{20,})", value) or re.search(
         r"[?&]id=([A-Za-z0-9_-]{20,})", value
     )
@@ -221,7 +268,7 @@ def download_drive_asset(file_ref, out_prefix):
         if file_id:
             metadata = drive_service.files().get(fileId=file_id, fields="name").execute()
             original_name = metadata.get("name", "asset.bin")
-        else:
+        elif value:
             escaped_name = value.replace("\\", "\\\\").replace("'", "\\'")
             result = drive_service.files().list(
                 q=f"name = '{escaped_name}' and trashed = false",
@@ -229,11 +276,19 @@ def download_drive_asset(file_ref, out_prefix):
                 pageSize=1,
             ).execute()
             matches = result.get("files", [])
-            if not matches:
-                print(f"WARNING: Drive asset '{value}' was not found.")
-                return ""
-            file_id = matches[0]["id"]
-            original_name = matches[0]["name"]
+            if matches:
+                file_id = matches[0]["id"]
+                original_name = matches[0]["name"]
+
+        # If cell was blank or contained a descriptive creative prompt instead of a Drive file,
+        # automatically rotate through the designated Google Drive library folder.
+        if not file_id and fallback_folder_name:
+            if value:
+                print(f"Drive asset '{value[:60]}...' is a text prompt; rotating from '{fallback_folder_name}'.")
+            file_id, original_name = get_fallback_drive_asset(fallback_folder_name, row_index)
+
+        if not file_id:
+            return ""
 
         extension = os.path.splitext(original_name)[1] or ".bin"
         local_path = f"{out_prefix}{extension}"
@@ -248,6 +303,7 @@ def download_drive_asset(file_ref, out_prefix):
     except Exception as exc:
         print(f"WARNING: Could not download Drive asset '{value}': {exc}")
         return ""
+
 
 # --- 2b. NOTIFICATION-ONLY DISPATCH FOR ROWS IN PENDING REVIEW ---
 if DISPATCH_ACTION == "send_approval_notifications":
@@ -273,7 +329,7 @@ if DISPATCH_ACTION == "send_approval_notifications":
     else:
         print(f"Successfully sent {sent_count} approval notification(s).")
     sys.exit(0)
-    
+
 # --- 3. STAGE 2: SCHEDULE AN APPROVED VIDEO BEFORE RENDERING A NEW ONE ---
 for row_number, row in enumerate(records, start=2):
     status = str(value_from_row(row, "Video Status")).strip().casefold()
@@ -296,9 +352,10 @@ for row_number, row in enumerate(records, start=2):
         body={
             "id": video_id,
             "status": {
-                "privacyStatus": "unlisted",
+                "privacyStatus": "private",
                 "publishAt": scheduled_at,
                 "selfDeclaredMadeForKids": False,
+                "embeddable": True,
             },
         },
     ).execute()
@@ -343,8 +400,12 @@ background_ref = str(value_from_row(study, "Background Image")).strip()
 
 print(f"Rendering row {target_row}: {study_title} ({video_format}).")
 
-local_background = download_drive_asset(background_ref, "drive_background")
-local_music = download_drive_asset(music_ref, "drive_music")
+local_background = download_drive_asset(
+    background_ref, "drive_background", fallback_folder_name=BG_FOLDER_NAME, row_index=target_row
+)
+local_music = download_drive_asset(
+    music_ref, "drive_music", fallback_folder_name=MUSIC_FOLDER_NAME, row_index=target_row
+)
 
 # --- 5. GENERATE THE DEVOTIONAL SCRIPT WITH GEMINI ---
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -720,6 +781,7 @@ video_body = {
     "status": {
         "privacyStatus": "unlisted",
         "selfDeclaredMadeForKids": False,
+        "embeddable": True,
     },
 }
 media = MediaFileUpload(
