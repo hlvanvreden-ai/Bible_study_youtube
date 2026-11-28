@@ -81,5 +81,5 @@ jobs:
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          DISPATCH_ACTION: ${{ github.event.action }}
+          DISPATCH_ACTION: ${{ github.event_name == 'repository_dispatch' && github.event.action || github.event.inputs.action_mode }}
         run: python scripts/generate_and_publish.py
